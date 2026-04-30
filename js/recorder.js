@@ -714,9 +714,13 @@ async function saveRecording(chosenFormat, mimeType) {
   const name    = `vcrec-${ts}.${ext}`;
 
   try {
-    const seekableBlob = await makeSeekable(rawBlob);
-    // For MP4 choice: if MediaRecorder actually encoded mp4, use it directly.
-    // Otherwise we save the seekable webm with .mp4 extension — plays in most players.
+    // Pass real elapsed duration in ms so EBML Duration field is correct.
+    // elapsedSeconds is tracked by the timer — multiply by 1000 for milliseconds.
+    const durationMs   = elapsedSeconds * 1000;
+    const seekableBlob = await makeSeekable(rawBlob, durationMs);
+    // For MP4: file is a seekable WebM container saved with .mp4 extension.
+    // Most players (VLC, Windows Media Player, MX Player) handle this correctly
+    // once the Duration + Cues metadata is present and valid.
     const finalBlob = new Blob([await seekableBlob.arrayBuffer()],
       { type: chosenFormat === 'mp4' ? 'video/mp4' : 'video/webm' });
     const url = URL.createObjectURL(finalBlob);
@@ -730,26 +734,39 @@ async function saveRecording(chosenFormat, mimeType) {
   }
 }
 
-// Injects Duration + Cues into a WebM blob using ts-ebml
-function makeSeekable(blob) {
+/* ── makeSeekable ───────────────────────────────────────────────────────────
+ * Injects Duration + Cues into a WebM blob so players can seek.
+ * PROBLEM: MediaRecorder never writes a Duration field into the WebM stream,
+ *          so reader2.duration is always NaN/0 → players can't seek.
+ * FIX:     Accept knownDurationMs from the elapsed timer and forcefully patch
+ *          it into the EBML metadata, overriding the missing/zero value.
+ *          This gives players the real duration → seeking works correctly.
+ */
+function makeSeekable(blob, knownDurationMs) {
   return new Promise((resolve, reject) => {
-    const reader    = new FileReader();
-    reader.onload   = () => {
+    const reader  = new FileReader();
+    reader.onload = () => {
       try {
-        const buf      = reader.result;
-        const decoder  = new EBML.Decoder();
-        const reader2  = new EBML.Reader();
-        reader2.logging = false;
+        const buf     = reader.result;
+        const decoder = new EBML.Decoder();
+        const reader2 = new EBML.Reader();
+        reader2.logging              = false;
         reader2.drop_default_duration = false;
 
         const elms = decoder.decode(buf);
         elms.forEach(e => reader2.read(e));
         reader2.stop();
 
+        // Use the known real duration — reader2.duration is unreliable (often NaN)
+        // WebM timecode scale default is 1,000,000 ns/tick = 1 ms per tick
+        const durationMs = (knownDurationMs && knownDurationMs > 0)
+          ? knownDurationMs
+          : (isFinite(reader2.duration) && reader2.duration > 0 ? reader2.duration : 0);
+
         const refined = EBML.tools.makeMetadataSeekable(
-          reader2.metadatas, reader2.duration, reader2.cues
+          reader2.metadatas, durationMs, reader2.cues
         );
-        const body = buf.slice(reader2.metadataSize);
+        const body        = buf.slice(reader2.metadataSize);
         const seekableBlob = new Blob([refined, body], { type: 'video/webm' });
         resolve(seekableBlob);
       } catch (err) {
