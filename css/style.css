@@ -194,9 +194,9 @@ html, body {
   border: none; border-radius: 2px; cursor: pointer;
   transition: all .15s; text-transform: uppercase; white-space: nowrap;
 }
-.ctrl-btn.primary { background: var(--accent); color: #000; flex: 1; }
+.ctrl-btn.primary { background: var(--accent); color: #000; }
 .ctrl-btn.primary:hover { background: #f5ff80; }
-.ctrl-btn.danger { background: var(--accent2); color: #fff; flex: 1; }
+.ctrl-btn.danger { background: var(--accent2); color: #fff; }
 .ctrl-btn.danger:hover { background: #ff6060; }
 .ctrl-btn.ghost-pause {
   background: transparent; color: var(--muted);
@@ -268,15 +268,22 @@ html, body {
 }
 .rec-timer.visible { display: block; }
 
-/* Controls bar — flush below the video */
+/* Controls bar — inside panel 01, no overlap */
 .preview-controls {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; flex-wrap: wrap;
-  padding: 12px 18px;
-  background: #161616;
-  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
 }
-.preview-btns { display: flex; gap: 8px; flex: 1; min-width: 0; }
+.preview-btns {
+  display: flex; gap: 8px;
+  min-width: 0; overflow: hidden;
+}
+.preview-btns .ctrl-btn {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
 .preview-format { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
 /* ===== AUDIO PANEL ===== */

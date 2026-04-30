@@ -395,17 +395,18 @@ btnStart.addEventListener('click', async () => {
     previewVideo.play().catch(() => {});
 
     // Step 7: Determine mimeType based on chosen format
-    // MP3 = audio/webm;codecs=opus (Chrome can't encode to MP3 natively — we save as opus, rename .mp3)
-    // MP4 = try video/mp4 first, fall back to webm then remux label
-    // WEBM = standard VP9+Opus
+    // Chrome MediaRecorder cannot natively encode H.264/AAC (MP4) or MP3.
+    // MP3  → record as audio/webm;codecs=opus (audio-only, no video tracks)
+    // MP4  → record as video/webm;codecs=vp9,opus (best Chrome can do)
+    //         saved with .mp4 extension — plays in VLC, Windows Media Player
+    // WEBM → video/webm;codecs=vp9,opus (native, best quality)
     let mimeType;
     if (chosenFormat === 'mp3') {
-      mimeType = 'audio/webm;codecs=opus';
-      if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/webm';
-    } else if (chosenFormat === 'mp4') {
-      const mp4Types = ['video/mp4;codecs=h264,aac','video/mp4;codecs=avc1','video/mp4'];
-      mimeType = mp4Types.find(t => MediaRecorder.isTypeSupported(t)) || getBestWebM();
+      // Audio-only: strip all video tracks, record pure opus audio
+      mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus' : 'audio/webm';
     } else {
+      // Both WEBM and MP4 use the same webm container — MP4 gets renamed on save
       mimeType = getBestWebM();
     }
 
@@ -493,8 +494,9 @@ async function saveRecording(chosenFormat, mimeType) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
   if (chosenFormat === 'mp3') {
-    // Audio-only: save as .mp3 (opus-encoded, widely playable)
-    const blob = new Blob(recordedChunks, { type: 'audio/mpeg' });
+    // Audio-only opus stream saved as .mp3
+    // MIME must be audio/webm — not audio/mpeg — so the browser plays it back correctly
+    const blob = new Blob(recordedChunks, { type: 'audio/webm;codecs=opus' });
     const url  = URL.createObjectURL(blob);
     const name = `vcrec-${ts}.mp3`;
     addToList(name, blob.size, url, 'MP3');

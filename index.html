@@ -95,6 +95,26 @@
           </label>
         </div>
       </div>
+
+      <!-- Divider -->
+      <div class="panel-divider"></div>
+
+      <!-- Controls + quality — inside panel 01 -->
+      <div class="preview-controls">
+        <div class="preview-btns">
+          <button class="ctrl-btn primary" id="btnStart">▶ START</button>
+          <button class="ctrl-btn ghost-pause" id="btnPause" disabled>⏸ PAUSE</button>
+          <button class="ctrl-btn danger" id="btnStop" disabled>⏹ STOP &amp; SAVE</button>
+        </div>
+        <div class="preview-format">
+          <select id="qualitySelect" class="fmt-select">
+            <option value="2500000">High — 2.5 Mbps</option>
+            <option value="5000000" selected>Best — 5 Mbps</option>
+            <option value="8000000">Max — 8 Mbps</option>
+          </select>
+          <span class="fmt-tag" id="fmtTag">WEBM · VP9+Opus</span>
+        </div>
+      </div>
     </section>
 
     <!-- ── PANEL 02: PREVIEW ── -->
@@ -114,22 +134,6 @@
         <div class="rec-timer" id="recTimer">00:00:00</div>
       </div>
 
-      <!-- Controls bar below preview -->
-      <div class="preview-controls">
-        <div class="preview-btns">
-          <button class="ctrl-btn primary" id="btnStart">▶ START</button>
-          <button class="ctrl-btn ghost-pause" id="btnPause" disabled>⏸ PAUSE</button>
-          <button class="ctrl-btn danger" id="btnStop" disabled>⏹ STOP &amp; SAVE</button>
-        </div>
-        <div class="preview-format">
-          <select id="qualitySelect" class="fmt-select">
-            <option value="2500000">High — 2.5 Mbps</option>
-            <option value="5000000" selected>Best — 5 Mbps</option>
-            <option value="8000000">Max — 8 Mbps</option>
-          </select>
-          <span class="fmt-tag" id="fmtTag">WEBM · VP9+Opus</span>
-        </div>
-      </div>
     </section>
 
     <!-- ── PANEL 03: AUDIO LEVELS ── -->
