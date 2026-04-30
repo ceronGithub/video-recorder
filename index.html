@@ -18,9 +18,124 @@
 
   <main class="main">
 
-    <!-- CALLER AUDIO INSTRUCTIONS -->
+    <!-- ── PANEL 01: SOURCE + CONTROLS (merged) ── -->
+    <section class="panel source-panel">
+      <h2 class="panel-label">01 / SOURCE &amp; CONTROLS</h2>
+
+      <!-- Source grid -->
+      <div class="source-grid">
+        <button class="src-btn active" id="btnScreen" data-mode="screen">
+          <span class="src-icon">⬜</span>
+          <span>Entire Screen</span>
+        </button>
+        <button class="src-btn" id="btnWindow" data-mode="window">
+          <span class="src-icon">⧉</span>
+          <span>Application Window</span>
+        </button>
+        <button class="src-btn" id="btnScreenTabMic" data-mode="screentabmic">
+          <span class="src-icon">🎙</span>
+          <span>Screen + Tab + Mic</span>
+          <span class="src-tag">CALL REC</span>
+        </button>
+        <button class="src-btn" id="btnCamera" data-mode="camera">
+          <span class="src-icon">◉</span>
+          <span>Camera + Mic</span>
+        </button>
+      </div>
+
+      <!-- Mic toggle -->
+      <div class="mic-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="includeMic" checked/>
+          <span class="toggle"></span>
+          Capture Microphone
+        </label>
+      </div>
+
+      <!-- Loopback device row -->
+      <div class="caller-device-row" id="callerDeviceRow">
+        <span class="caller-device-label">Caller Audio Device<br/><small>(VB-Cable / Stereo Mix)</small></span>
+        <select id="callerDeviceSelect" class="caller-device-select"></select>
+        <button id="btnRefreshDevices" class="btn-refresh" title="Refresh device list">↻</button>
+      </div>
+
+      <!-- Loopback warning -->
+      <div class="loopback-warning" id="loopbackWarning">
+        ⚠ No Caller Audio Device selected. Desktop app audio (Teams, Zoom) will NOT be recorded.
+        Install VB-Cable and select it above, or switch to <strong>Screen + Tab + Mic</strong> for browser calls.
+      </div>
+
+      <!-- Divider -->
+      <div class="panel-divider"></div>
+      <p class="src-note">↓ Live preview and recording controls are in panel 02 below</p>
+    </section>
+
+    <!-- ── PANEL 02: PREVIEW ── -->
+    <section class="panel preview-panel">
+      <h2 class="panel-label">02 / LIVE PREVIEW</h2>
+
+      <!-- Live video feed -->
+      <div class="preview-wrap" id="previewWrap">
+        <video id="previewVideo" autoplay muted playsinline></video>
+        <div class="preview-placeholder" id="previewPlaceholder">
+          <div class="ph-icon">▶</div>
+          <p>Select a source above and click START — live preview appears here</p>
+        </div>
+        <div class="rec-badge" id="recBadge">
+          <span class="rec-dot"></span> REC
+        </div>
+        <div class="rec-timer" id="recTimer">00:00:00</div>
+      </div>
+
+      <!-- Controls bar below preview -->
+      <div class="preview-controls">
+        <div class="preview-btns">
+          <button class="ctrl-btn primary" id="btnStart">▶ START</button>
+          <button class="ctrl-btn ghost-pause" id="btnPause" disabled>⏸ PAUSE</button>
+          <button class="ctrl-btn danger" id="btnStop" disabled>⏹ STOP &amp; SAVE</button>
+        </div>
+        <div class="preview-format">
+          <select id="qualitySelect" class="fmt-select">
+            <option value="2500000">High — 2.5 Mbps</option>
+            <option value="5000000" selected>Best — 5 Mbps</option>
+            <option value="8000000">Max — 8 Mbps</option>
+          </select>
+          <span class="fmt-tag">WEBM · VP9+Opus</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── PANEL 03: AUDIO LEVELS ── -->
+    <section class="panel audio-panel">
+      <h2 class="panel-label">03 / AUDIO LEVELS</h2>
+      <div class="audio-meters">
+        <div class="meter-row">
+          <span class="meter-label">MIC</span>
+          <div class="meter-track"><div class="meter-fill" id="micMeter"></div></div>
+          <input type="range" class="vol-slider" id="micVolume" min="0" max="400" value="100" title="Mic Volume"/>
+          <span class="vol-pct" id="micVolPct">100%</span>
+        </div>
+        <div class="meter-row">
+          <span class="meter-label">CALLER</span>
+          <div class="meter-track"><div class="meter-fill" id="sysMeter"></div></div>
+          <input type="range" class="vol-slider" id="callerVolume" min="0" max="400" value="100" title="Caller Volume"/>
+          <span class="vol-pct" id="callerVolPct">100%</span>
+        </div>
+      </div>
+      <p class="audio-hint">MIC = your voice · CALLER = other side · Both: noise cancel → de-mud → presence boost → clarity → compressor</p>
+    </section>
+
+    <!-- ── PANEL 04: SAVED RECORDINGS ── -->
+    <section class="panel recordings-panel">
+      <h2 class="panel-label">04 / SAVED RECORDINGS</h2>
+      <ul class="rec-list" id="recList">
+        <li class="rec-empty">No recordings yet.</li>
+      </ul>
+    </section>
+
+    <!-- ── PANEL 05: CALLER AUDIO GUIDE ── -->
     <section class="panel hint-panel">
-      <h2 class="panel-label">ℹ CAPTURING CALLER AUDIO — TWO METHODS</h2>
+      <h2 class="panel-label">05 / CAPTURING CALLER AUDIO — TWO METHODS</h2>
       <div class="hint-cols">
         <div class="hint-col">
           <p class="hint-col-title">METHOD A — Chrome Tab (browser-based calls only)</p>
@@ -45,117 +160,10 @@
       </div>
     </section>
 
-    <!-- SOURCE SELECTION -->
-    <section class="panel source-panel">
-      <h2 class="panel-label">01 / SOURCE</h2>
-      <div class="source-grid">
-        <button class="src-btn active" id="btnScreen" data-mode="screen">
-          <span class="src-icon">⬜</span>
-          <span>Entire Screen</span>
-        </button>
-        <button class="src-btn" id="btnWindow" data-mode="window">
-          <span class="src-icon">⧉</span>
-          <span>Application Window</span>
-        </button>
-        <button class="src-btn" id="btnScreenTabMic" data-mode="screentabmic">
-          <span class="src-icon">🎙</span>
-          <span>Screen + Tab + Mic</span>
-          <span class="src-tag">CALL REC</span>
-        </button>
-        <button class="src-btn" id="btnCamera" data-mode="camera">
-          <span class="src-icon">◉</span>
-          <span>Camera + Mic</span>
-        </button>
-      </div>
-
-      <div class="mic-row">
-        <label class="toggle-label">
-          <input type="checkbox" id="includeMic" checked/>
-          <span class="toggle"></span>
-          Capture Microphone
-        </label>
-      </div>
-
-      <!-- LOOPBACK DEVICE ROW — visible only for Entire Screen / Window modes -->
-      <div class="caller-device-row" id="callerDeviceRow">
-        <span class="caller-device-label">Caller Audio Device<br/><small>(VB-Cable / Stereo Mix)</small></span>
-        <select id="callerDeviceSelect" class="caller-device-select"></select>
-        <button id="btnRefreshDevices" class="btn-refresh" title="Refresh device list">↻</button>
-      </div>
-
-      <!-- Warning shown when screen/window mode is active but no loopback device is selected -->
-      <div class="loopback-warning" id="loopbackWarning">
-        ⚠ No Caller Audio Device selected. Desktop app audio (Teams, Zoom) will NOT be recorded.
-        Install VB-Cable and select it above, or switch to <strong>Screen + Tab + Mic</strong> for browser calls.
-      </div>
-    </section>
-
-    <!-- PREVIEW -->
-    <section class="panel preview-panel">
-      <h2 class="panel-label">02 / PREVIEW</h2>
-      <div class="preview-wrap" id="previewWrap">
-        <video id="previewVideo" autoplay muted playsinline></video>
-        <div class="preview-placeholder" id="previewPlaceholder">
-          <div class="ph-icon">▶</div>
-          <p>Select a source and click START to preview</p>
-        </div>
-        <div class="rec-badge" id="recBadge">
-          <span class="rec-dot"></span> REC
-        </div>
-        <div class="rec-timer" id="recTimer">00:00:00</div>
-      </div>
-    </section>
-
-    <!-- AUDIO LEVELS -->
-    <section class="panel audio-panel">
-      <h2 class="panel-label">03 / AUDIO LEVELS</h2>
-      <div class="audio-meters">
-        <div class="meter-row">
-          <span class="meter-label">MIC</span>
-          <div class="meter-track"><div class="meter-fill" id="micMeter"></div></div>
-          <input type="range" class="vol-slider" id="micVolume" min="0" max="400" value="100" title="Mic Volume (100% = unity, 400% = 4× boost)"/>
-          <span class="vol-pct" id="micVolPct">100%</span>
-        </div>
-        <div class="meter-row">
-          <span class="meter-label" title="Audio from the other caller">CALLER</span>
-          <div class="meter-track"><div class="meter-fill" id="sysMeter"></div></div>
-          <input type="range" class="vol-slider" id="callerVolume" min="0" max="400" value="100" title="Caller Volume (100% = unity, 400% = 4× boost)"/>
-          <span class="vol-pct" id="callerVolPct">100%</span>
-        </div>
-      </div>
-      <p class="audio-hint">MIC = your voice · CALLER = other side · 100% = unity gain · compressor prevents buzzing at high levels</p>
-    </section>
-
-    <!-- CONTROLS -->
-    <section class="panel controls-panel">
-      <h2 class="panel-label">04 / CONTROLS</h2>
-      <div class="controls-row">
-        <button class="ctrl-btn primary" id="btnStart">START</button>
-        <button class="ctrl-btn danger" id="btnStop" disabled>STOP & SAVE</button>
-        <button class="ctrl-btn ghost" id="btnPause" disabled>PAUSE</button>
-      </div>
-      <div class="format-row">
-        <span class="fmt-label">Quality:</span>
-        <select id="qualitySelect" class="fmt-select">
-          <option value="2500000">High (2.5 Mbps)</option>
-          <option value="5000000" selected>Best (5 Mbps)</option>
-          <option value="8000000">Max (8 Mbps)</option>
-        </select>
-        <span class="fmt-label">Format:</span>
-        <span class="fmt-tag">WEBM (VP9+Opus)</span>
-      </div>
-    </section>
-
-    <!-- RECORDINGS LIST -->
-    <section class="panel recordings-panel">
-      <h2 class="panel-label">05 / SAVED RECORDINGS</h2>
-      <ul class="rec-list" id="recList">
-        <li class="rec-empty">No recordings yet.</li>
-      </ul>
-    </section>
-
   </main>
 
+  <!-- ts-ebml: injects duration + cues into WebM so the file is seekable -->
+  <script src="https://cdn.jsdelivr.net/npm/ts-ebml@2.0.2/lib/index.js"></script>
   <script src="js/recorder.js"></script>
 </body>
 </html>

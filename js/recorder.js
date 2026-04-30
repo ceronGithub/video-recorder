@@ -149,48 +149,93 @@ function startTimer() {
 function stopTimer() { clearInterval(timerInterval); timerInterval = null; }
 
 // ── Audio pipeline ────────────────────────────────────
-// Mic path:     getUserMedia → GainNode (mic vol) → Analyser → Destination
-// Caller path:  loopback/tab → GainNode (caller vol) → DynamicsCompressor → Analyser → Destination
+// Each track (MIC + CALLER) goes through the same voice enhancement chain:
 //
-// DynamicsCompressor on caller path prevents clipping and buzzing when
-// caller volume is boosted high — compresses peaks before they distort.
+//   Source → HighPass(80Hz) → LowShelf(-6dB@200Hz) → Peaking(+4dB@3kHz)
+//          → HighShelf(+3dB@6kHz) → Compressor → Gain → Destination
+//
+//  HighPass 80Hz      : removes low-end rumble, keyboard thumps, AC hum
+//  LowShelf -6dB 200Hz: cuts muddiness / boominess from voice
+//  Peaking +4dB 3kHz  : boosts voice presence and intelligibility
+//  HighShelf +3dB 6kHz: adds clarity and air to the voice
+//  DynamicsCompressor : evens out loudness, prevents clipping at high gain
+//  Gain               : user volume slider (0–400%)
+//
+// getUserMedia mic constraints (echoCancellation, noiseSuppression, autoGainControl)
+// handle hardware-level noise cancellation BEFORE the signal even reaches WebAudio.
+// This chain is the software-level enhancement layer on top.
+function buildVoiceChain(ctx, sourceNode, gainNode, dest) {
+  // 1. High-pass: cut everything below 80Hz (rumble, thumps)
+  const hp = ctx.createBiquadFilter();
+  hp.type            = 'highpass';
+  hp.frequency.value = 80;
+  hp.Q.value         = 0.7;
+
+  // 2. Low-shelf: reduce muddiness around 200Hz
+  const mud = ctx.createBiquadFilter();
+  mud.type            = 'lowshelf';
+  mud.frequency.value = 200;
+  mud.gain.value      = -6;
+
+  // 3. Peaking: boost voice presence at 3kHz (speech intelligibility sweet spot)
+  const presence = ctx.createBiquadFilter();
+  presence.type            = 'peaking';
+  presence.frequency.value = 3000;
+  presence.Q.value         = 1.0;
+  presence.gain.value      = 4;
+
+  // 4. High-shelf: add air/crispness above 6kHz
+  const air = ctx.createBiquadFilter();
+  air.type            = 'highshelf';
+  air.frequency.value = 6000;
+  air.gain.value      = 3;
+
+  // 5. Dynamics compressor: normalize loudness, prevent distortion
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -24;
+  comp.knee.value      = 6;
+  comp.ratio.value     = 4;
+  comp.attack.value    = 0.003;
+  comp.release.value   = 0.25;
+
+  // Wire chain: source → hp → mud → presence → air → comp → gain → dest
+  sourceNode.connect(hp);
+  hp.connect(mud);
+  mud.connect(presence);
+  presence.connect(air);
+  air.connect(comp);
+  comp.connect(gainNode);
+  gainNode.connect(dest);
+
+  // Return compressor node so analyser can tap post-comp signal
+  return comp;
+}
+
 function buildAudioPipeline(micStreamIn, callerStreamIn) {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const dest = audioCtx.createMediaStreamDestination();
 
   micGain    = audioCtx.createGain();
   callerGain = audioCtx.createGain();
-  // Read current slider values at pipeline creation time
   micGain.gain.value    = parseInt(micVolumeSlider.value, 10) / 100;
   callerGain.gain.value = parseInt(callerVolumeSlider.value, 10) / 100;
 
   micAnalyser = audioCtx.createAnalyser(); micAnalyser.fftSize = 256;
   sysAnalyser = audioCtx.createAnalyser(); sysAnalyser.fftSize = 256;
 
-  // Compressor on caller path: prevents buzz/distortion at high gain
-  const compressor = audioCtx.createDynamicsCompressor();
-  compressor.threshold.value = -24;  // start compressing at -24 dBFS
-  compressor.knee.value      = 6;
-  compressor.ratio.value     = 4;    // 4:1 compression ratio
-  compressor.attack.value    = 0.003;
-  compressor.release.value   = 0.25;
-
   if (micStreamIn && micStreamIn.getAudioTracks().length > 0) {
-    const src = audioCtx.createMediaStreamSource(micStreamIn);
-    src.connect(micGain);
-    micGain.connect(micAnalyser);
-    micGain.connect(dest);
+    const src  = audioCtx.createMediaStreamSource(micStreamIn);
+    const comp = buildVoiceChain(audioCtx, src, micGain, dest);
+    comp.connect(micAnalyser);  // tap analyser after compressor
   }
 
   if (callerStreamIn && callerStreamIn.getAudioTracks().length > 0) {
-    const src = audioCtx.createMediaStreamSource(callerStreamIn);
-    src.connect(callerGain);
-    callerGain.connect(compressor);   // compress before measuring/recording
-    compressor.connect(sysAnalyser);
-    compressor.connect(dest);
+    const src  = audioCtx.createMediaStreamSource(callerStreamIn);
+    const comp = buildVoiceChain(audioCtx, src, callerGain, dest);
+    comp.connect(sysAnalyser);  // tap analyser after compressor
   }
 
-  // VU meter animation loop
+  // VU meter animation
   const buf = new Uint8Array(256);
   function draw() {
     animFrame = requestAnimationFrame(draw);
@@ -255,16 +300,22 @@ btnStart.addEventListener('click', async () => {
       });
     }
 
-    // Step 2: Capture microphone with noise processing ON
+    // Step 2: Capture microphone — hardware noise cancellation ON
+    // echoCancellation: removes speaker bleed picked up by mic
+    // noiseSuppression: removes background noise (fans, AC, keyboard)
+    // autoGainControl:  normalizes mic input level automatically
     const forceMic = (activeMode === 'screentabmic' || activeMode === 'camera');
     let micStreamLocal = null;
     if (forceMic || includeMic.checked) {
       try {
         micStreamLocal = await navigator.mediaDevices.getUserMedia({
           audio: {
-            echoCancellation:  true,
-            noiseSuppression:  true,
-            autoGainControl:   true
+            echoCancellation:    true,
+            noiseSuppression:    true,
+            autoGainControl:     true,
+            channelCount:        1,     // mono for voice — cleaner than stereo
+            sampleRate:          48000, // Opus optimal sample rate
+            sampleSize:          16
           },
           video: false
         });
@@ -329,7 +380,7 @@ btnStart.addEventListener('click', async () => {
     mediaRecorder.ondataavailable = e => {
       if (e.data && e.data.size > 0) recordedChunks.push(e.data);
     };
-    mediaRecorder.onstop = () => saveRecording(mimeType);
+    mediaRecorder.onstop = () => { saveRecording(mimeType); };
     mediaRecorder.start(500);
 
     if (videoTrack) {
@@ -397,14 +448,59 @@ function stopRecording() {
   isPaused = false;
 }
 
-// ── SAVE ──────────────────────────────────────────────
-function saveRecording(mimeType) {
-  const blob = new Blob(recordedChunks, { type: 'video/webm' });
-  const url  = URL.createObjectURL(blob);
+// ── SAVE — with seekable duration fix ─────────────────
+// Chrome's MediaRecorder produces WebM with duration = -1 (unknown).
+// Players like Windows Media Player and VLC can't seek such files.
+// ts-ebml reads the EBML structure and writes back the correct
+// Duration element + a Cues index so the file is fully seekable.
+async function saveRecording(mimeType) {
   const ts   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const name = `vcrec-${ts}.webm`;
-  addToList(name, blob.size, url);
-  triggerDownload(url, name);
+  const rawBlob = new Blob(recordedChunks, { type: 'video/webm' });
+
+  try {
+    const seekableBlob = await makeSeekable(rawBlob);
+    const url = URL.createObjectURL(seekableBlob);
+    addToList(name, seekableBlob.size, url);
+    triggerDownload(url, name);
+  } catch (e) {
+    // Fallback: save raw blob if ts-ebml fails for any reason
+    console.warn('Seekable fix failed, saving raw:', e);
+    const url = URL.createObjectURL(rawBlob);
+    addToList(name, rawBlob.size, url);
+    triggerDownload(url, name);
+  }
+}
+
+// Injects Duration + Cues into a WebM blob using ts-ebml
+function makeSeekable(blob) {
+  return new Promise((resolve, reject) => {
+    const reader    = new FileReader();
+    reader.onload   = () => {
+      try {
+        const buf      = reader.result;
+        const decoder  = new EBML.Decoder();
+        const reader2  = new EBML.Reader();
+        reader2.logging = false;
+        reader2.drop_default_duration = false;
+
+        const elms = decoder.decode(buf);
+        elms.forEach(e => reader2.read(e));
+        reader2.stop();
+
+        const refined = EBML.tools.makeMetadataSeekable(
+          reader2.metadatas, reader2.duration, reader2.cues
+        );
+        const body = buf.slice(reader2.metadataSize);
+        const seekableBlob = new Blob([refined, body], { type: 'video/webm' });
+        resolve(seekableBlob);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(blob);
+  });
 }
 
 function triggerDownload(url, name) {
