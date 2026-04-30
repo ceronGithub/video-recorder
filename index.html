@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>VCREC — Video Call Recorder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/style.css"/>
+</head>
+<body>
+  <div class="grain"></div>
+
+  <header class="header">
+    <div class="logo">VCREC<span class="dot">●</span></div>
+    <div class="status-bar" id="statusBar">IDLE</div>
+  </header>
+
+  <main class="main">
+
+    <!-- CALLER AUDIO INSTRUCTIONS -->
+    <section class="panel hint-panel">
+      <h2 class="panel-label">ℹ CAPTURING CALLER AUDIO — TWO METHODS</h2>
+      <div class="hint-cols">
+        <div class="hint-col">
+          <p class="hint-col-title">METHOD A — Chrome Tab (browser-based calls only)</p>
+          <ol class="hint-steps">
+            <li>Use <strong>Screen + Tab + Mic</strong> mode.</li>
+            <li>In the share dialog, switch to <strong>"Chrome Tab"</strong>.</li>
+            <li>Select your call tab (Messenger, Meet, etc.).</li>
+            <li>Check <strong>"Share tab audio"</strong> → click Share.</li>
+            <li>Works for web-based calls only — NOT desktop apps.</li>
+          </ol>
+        </div>
+        <div class="hint-col">
+          <p class="hint-col-title">METHOD B — VB-Cable (MS Teams, Zoom, Skype desktop)</p>
+          <ol class="hint-steps">
+            <li>Install <strong>VB-Cable</strong> (free): <em>vb-audio.com/Cable</em></li>
+            <li>Windows Sound → Playback → set <strong>CABLE Input</strong> as default.</li>
+            <li>In VCREC, select <strong>★ CABLE Output</strong> in Caller Audio Device.</li>
+            <li>Use <strong>Entire Screen</strong> or <strong>Window</strong> mode → START.</li>
+            <li>Status bar will show <strong>LOOPBACK</strong> when active.</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <!-- SOURCE SELECTION -->
+    <section class="panel source-panel">
+      <h2 class="panel-label">01 / SOURCE</h2>
+      <div class="source-grid">
+        <button class="src-btn active" id="btnScreen" data-mode="screen">
+          <span class="src-icon">⬜</span>
+          <span>Entire Screen</span>
+        </button>
+        <button class="src-btn" id="btnWindow" data-mode="window">
+          <span class="src-icon">⧉</span>
+          <span>Application Window</span>
+        </button>
+        <button class="src-btn" id="btnScreenTabMic" data-mode="screentabmic">
+          <span class="src-icon">🎙</span>
+          <span>Screen + Tab + Mic</span>
+          <span class="src-tag">CALL REC</span>
+        </button>
+        <button class="src-btn" id="btnCamera" data-mode="camera">
+          <span class="src-icon">◉</span>
+          <span>Camera + Mic</span>
+        </button>
+      </div>
+
+      <div class="mic-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="includeMic" checked/>
+          <span class="toggle"></span>
+          Capture Microphone
+        </label>
+      </div>
+
+      <!-- LOOPBACK DEVICE ROW — visible only for Entire Screen / Window modes -->
+      <div class="caller-device-row" id="callerDeviceRow">
+        <span class="caller-device-label">Caller Audio Device<br/><small>(VB-Cable / Stereo Mix)</small></span>
+        <select id="callerDeviceSelect" class="caller-device-select"></select>
+        <button id="btnRefreshDevices" class="btn-refresh" title="Refresh device list">↻</button>
+      </div>
+
+      <!-- Warning shown when screen/window mode is active but no loopback device is selected -->
+      <div class="loopback-warning" id="loopbackWarning">
+        ⚠ No Caller Audio Device selected. Desktop app audio (Teams, Zoom) will NOT be recorded.
+        Install VB-Cable and select it above, or switch to <strong>Screen + Tab + Mic</strong> for browser calls.
+      </div>
+    </section>
+
+    <!-- PREVIEW -->
+    <section class="panel preview-panel">
+      <h2 class="panel-label">02 / PREVIEW</h2>
+      <div class="preview-wrap" id="previewWrap">
+        <video id="previewVideo" autoplay muted playsinline></video>
+        <div class="preview-placeholder" id="previewPlaceholder">
+          <div class="ph-icon">▶</div>
+          <p>Select a source and click START to preview</p>
+        </div>
+        <div class="rec-badge" id="recBadge">
+          <span class="rec-dot"></span> REC
+        </div>
+        <div class="rec-timer" id="recTimer">00:00:00</div>
+      </div>
+    </section>
+
+    <!-- AUDIO LEVELS -->
+    <section class="panel audio-panel">
+      <h2 class="panel-label">03 / AUDIO LEVELS</h2>
+      <div class="audio-meters">
+        <div class="meter-row">
+          <span class="meter-label">MIC</span>
+          <div class="meter-track"><div class="meter-fill" id="micMeter"></div></div>
+          <input type="range" class="vol-slider" id="micVolume" min="0" max="400" value="100" title="Mic Volume (100% = unity, 400% = 4× boost)"/>
+          <span class="vol-pct" id="micVolPct">100%</span>
+        </div>
+        <div class="meter-row">
+          <span class="meter-label" title="Audio from the other caller">CALLER</span>
+          <div class="meter-track"><div class="meter-fill" id="sysMeter"></div></div>
+          <input type="range" class="vol-slider" id="callerVolume" min="0" max="400" value="100" title="Caller Volume (100% = unity, 400% = 4× boost)"/>
+          <span class="vol-pct" id="callerVolPct">100%</span>
+        </div>
+      </div>
+      <p class="audio-hint">MIC = your voice · CALLER = other side · 100% = unity gain · compressor prevents buzzing at high levels</p>
+    </section>
+
+    <!-- CONTROLS -->
+    <section class="panel controls-panel">
+      <h2 class="panel-label">04 / CONTROLS</h2>
+      <div class="controls-row">
+        <button class="ctrl-btn primary" id="btnStart">START</button>
+        <button class="ctrl-btn danger" id="btnStop" disabled>STOP & SAVE</button>
+        <button class="ctrl-btn ghost" id="btnPause" disabled>PAUSE</button>
+      </div>
+      <div class="format-row">
+        <span class="fmt-label">Quality:</span>
+        <select id="qualitySelect" class="fmt-select">
+          <option value="2500000">High (2.5 Mbps)</option>
+          <option value="5000000" selected>Best (5 Mbps)</option>
+          <option value="8000000">Max (8 Mbps)</option>
+        </select>
+        <span class="fmt-label">Format:</span>
+        <span class="fmt-tag">WEBM (VP9+Opus)</span>
+      </div>
+    </section>
+
+    <!-- RECORDINGS LIST -->
+    <section class="panel recordings-panel">
+      <h2 class="panel-label">05 / SAVED RECORDINGS</h2>
+      <ul class="rec-list" id="recList">
+        <li class="rec-empty">No recordings yet.</li>
+      </ul>
+    </section>
+
+  </main>
+
+  <script src="js/recorder.js"></script>
+</body>
+</html>
