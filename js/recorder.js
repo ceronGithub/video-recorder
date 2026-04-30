@@ -179,17 +179,18 @@ function stopTimer() { clearInterval(timerInterval); timerInterval = null; }
 // processed by the call app and doesn't have the low-end boominess a raw mic has.
 // Removing the -6dB cut recovers significant perceived volume on the caller side.
 /* ── buildMicChain ──────────────────────────────────────────────────────────
- * Aggressive noise suppression for microphone input.
- * Goal: eliminate laptop fan hum, keyboard clicks, and mechanical noise.
- * Passes only the human voice frequency range (150 Hz – 8 kHz).
+ * Noise suppression for microphone input. Voice only — no fan, no cricket.
  *
- * Chain: source → gain → HP(150Hz) → HP(150Hz) → notch(380Hz keyboard thud)
- *        → mud cut(200Hz -10dB) → presence boost(3kHz) → air(8kHz)
+ * Analysis confirmed noise on mic side: 141 Hz (fan), 153 Hz (fan harmonic),
+ * 379 Hz (cricket/laptop resonance), 424 Hz (cricket harmonic).
+ *
+ * Chain: source → gain → HP(150Hz) × 2 → notch(141Hz) → notch(153Hz)
+ *        → notch(379Hz) → notch(424Hz) → mud(-10dB@200Hz)
+ *        → presence(+5dB@2.5kHz) → air(+2dB@8kHz) → LP(8kHz)
  *        → noise gate → compressor → dest
  */
 function buildMicChain(ctx, sourceNode, gainNode, dest) {
-  // 1. Dual high-pass at 150 Hz — frequency analysis shows fan body at 80-200 Hz;
-  //    stacked filters create a steeper rolloff to kill it completely
+  // 1. Dual high-pass at 150 Hz — stacked for steep rolloff; kills fan body (80–140 Hz)
   const hp1 = ctx.createBiquadFilter();
   hp1.type            = 'highpass';
   hp1.frequency.value = 150;
@@ -200,86 +201,96 @@ function buildMicChain(ctx, sourceNode, gainNode, dest) {
   hp2.frequency.value = 150;
   hp2.Q.value         = 1.0;
 
-  // 2. Low-pass ceiling at 8000 Hz — above voice range; kills hiss and high-freq fan whine
-  const lp = ctx.createBiquadFilter();
-  lp.type            = 'lowpass';
-  lp.frequency.value = 8000;
-  lp.Q.value         = 0.7;
+  // 2. Notch at 141 Hz — laptop fan motor fundamental (confirmed dominant in analysis)
+  const notch141 = ctx.createBiquadFilter();
+  notch141.type            = 'notch';
+  notch141.frequency.value = 141;
+  notch141.Q.value         = 5;
 
-  // 3. Notch at 380 Hz — keyboard mechanical thud resonance lives here
-  const notch = ctx.createBiquadFilter();
-  notch.type            = 'notch';
-  notch.frequency.value = 380;
-  notch.Q.value         = 2.5;
+  // 3. Notch at 153 Hz — fan harmonic (second strongest noise peak)
+  const notch153 = ctx.createBiquadFilter();
+  notch153.type            = 'notch';
+  notch153.frequency.value = 153;
+  notch153.Q.value         = 5;
 
-  // 4. Low-shelf mud cut — reduce boxy 200 Hz buildup from room acoustics
+  // 4. Notch at 379 Hz — cricket/laptop body resonance (confirmed in silence segments)
+  const notch379 = ctx.createBiquadFilter();
+  notch379.type            = 'notch';
+  notch379.frequency.value = 379;
+  notch379.Q.value         = 4;
+
+  // 5. Notch at 424 Hz — cricket harmonic (confirmed at 424.5 Hz in noise-only segments)
+  const notch424 = ctx.createBiquadFilter();
+  notch424.type            = 'notch';
+  notch424.frequency.value = 424;
+  notch424.Q.value         = 4;
+
+  // 6. Low-shelf mud cut — reduce boxy 200 Hz room buildup
   const mud = ctx.createBiquadFilter();
   mud.type            = 'lowshelf';
   mud.frequency.value = 200;
   mud.gain.value      = -10;
 
-  // 5. Presence boost at 2.5 kHz — makes voice cut through clearly
+  // 7. Presence boost at 2.5 kHz — voice intelligibility
   const presence = ctx.createBiquadFilter();
   presence.type            = 'peaking';
   presence.frequency.value = 2500;
   presence.Q.value         = 1.2;
   presence.gain.value      = 5;
 
-  // 6. Air shelf at 8 kHz — slight lift for clarity without hiss
+  // 8. Air shelf at 8 kHz — clarity lift
   const air = ctx.createBiquadFilter();
   air.type            = 'highshelf';
   air.frequency.value = 8000;
   air.gain.value      = 2;
 
-  // 7. Adaptive noise gate with noise-floor profiling
-  //    Phase 1 (first 1.5s): silently measure the noise floor RMS (fan, room hum).
-  //    Phase 2 (recording): gate opens only when signal is VOICE_MARGIN dB above
-  //    the measured noise floor — so fan noise never opens the gate even if loud.
-  //    Hold prevents chopped syllables. Soft fade avoids clicks on open/close.
-  const bufSize = 2048;
-  const gate    = ctx.createScriptProcessor(bufSize, 1, 1);
+  // 9. Low-pass ceiling at 8000 Hz — kills hiss and high-freq whine above voice range
+  const lp = ctx.createBiquadFilter();
+  lp.type            = 'lowpass';
+  lp.frequency.value = 8000;
+  lp.Q.value         = 0.7;
 
-  const PROFILE_BUFS  = Math.ceil(1.5 * (ctx.sampleRate || 48000) / bufSize); // ~1.5s
-  const VOICE_MARGIN  = 10;   // dB above noise floor required to open gate
-  const HOLD_SEC      = 0.20; // seconds to hold gate open after voice drops
-  const FADE_STEP     = 0.08; // gain step per buffer for soft open/close (avoids clicks)
+  // 10. Adaptive noise gate — profiles first 1.5s as noise floor baseline.
+  //     Gate opens only when RMS is VOICE_MARGIN dB above that floor.
+  //     Prevents fan/cricket bleed during silences between words.
+  const bufSize      = 2048;
+  const gate         = ctx.createScriptProcessor(bufSize, 1, 1);
+  const PROFILE_BUFS = Math.ceil(1.5 * (ctx.sampleRate || 48000) / bufSize);
+  const VOICE_MARGIN = 12;   // raised to 12 dB — stricter, cricket is persistent
+  const HOLD_SEC     = 0.20;
+  const FADE_STEP    = 0.08;
 
   let profileCount  = 0;
   let noiseRmsSum   = 0;
-  let noiseFloorRms = 0.0015; // conservative fallback (~-56 dBFS)
+  let noiseFloorRms = 0.0015;
   let holdCount     = 0;
   let holdSamples   = Math.round(HOLD_SEC * (ctx.sampleRate || 48000) / bufSize);
-  let gateGain      = 0;      // current output gain (0=closed, 1=open), faded smoothly
+  let gateGain      = 0;
 
   gate.onaudioprocess = e => {
     const input  = e.inputBuffer.getChannelData(0);
     const output = e.outputBuffer.getChannelData(0);
-
-    // RMS of this buffer
     let sum = 0;
     for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
     const rms = Math.sqrt(sum / input.length);
 
-    // Phase 1: build noise floor profile from first PROFILE_BUFS buffers
     if (profileCount < PROFILE_BUFS) {
       noiseRmsSum += rms;
       profileCount++;
       if (profileCount === PROFILE_BUFS) {
-        noiseFloorRms = (noiseRmsSum / PROFILE_BUFS) * 1.2; // +20% safety margin
+        noiseFloorRms = (noiseRmsSum / PROFILE_BUFS) * 1.2;
       }
-      output.fill(0); // mute during profiling
+      output.fill(0);
       return;
     }
 
-    // Phase 2: open gate only when rms is VOICE_MARGIN dB above noise floor
     const threshold = noiseFloorRms * Math.pow(10, VOICE_MARGIN / 20);
     if (rms > threshold) {
-      holdCount = holdSamples;  // voice detected — open gate, reset hold timer
+      holdCount = holdSamples;
     } else if (holdCount > 0) {
-      holdCount--;              // hold open — trailing syllables / breath
+      holdCount--;
     }
 
-    // Soft fade — ramp gain up/down by FADE_STEP to avoid click artifacts
     const targetGain = holdCount > 0 ? 1 : 0;
     gateGain = gateGain < targetGain
       ? Math.min(gateGain + FADE_STEP, 1)
@@ -288,7 +299,7 @@ function buildMicChain(ctx, sourceNode, gainNode, dest) {
     for (let i = 0; i < input.length; i++) output[i] = input[i] * gateGain;
   };
 
-  // 8. Compressor — normalize voice dynamics, prevent clipping
+  // 11. Compressor — normalize voice dynamics, prevent clipping
   const comp = ctx.createDynamicsCompressor();
   comp.threshold.value = -20;
   comp.knee.value      = 6;
@@ -296,16 +307,20 @@ function buildMicChain(ctx, sourceNode, gainNode, dest) {
   comp.attack.value    = 0.003;
   comp.release.value   = 0.25;
 
-  // Wire: source → gain → hp1 → hp2 → lp → notch → mud → presence → air → gate → comp → dest
+  // Wire: source → gain → hp1 → hp2 → notch141 → notch153 → notch379 → notch424
+  //       → mud → presence → air → lp → gate → comp → dest
   sourceNode.connect(gainNode);
   gainNode.connect(hp1);
   hp1.connect(hp2);
-  hp2.connect(lp);
-  lp.connect(notch);
-  notch.connect(mud);
+  hp2.connect(notch141);
+  notch141.connect(notch153);
+  notch153.connect(notch379);
+  notch379.connect(notch424);
+  notch424.connect(mud);
   mud.connect(presence);
   presence.connect(air);
-  air.connect(gate);
+  air.connect(lp);
+  lp.connect(gate);
   gate.connect(comp);
   comp.connect(dest);
 
@@ -313,59 +328,86 @@ function buildMicChain(ctx, sourceNode, gainNode, dest) {
 }
 
 /* ── buildCallerChain ───────────────────────────────────────────────────────
- * Processes caller / app audio (VB-Cable, tab audio, YouTube).
- * Analysis of recorded audio confirmed a constant -21.5 dBFS tone at 120 Hz
- * (electrical ground loop hum from earphone cable into loopback device).
- * 120 Hz is 10 dB louder than the YouTube signal — it must be notched out.
+ * Processes caller / app audio (VB-Cable, tab audio, YouTube/movies).
  *
- * Chain: source → preBoost → gain → HP(80Hz) → notch(60Hz) → notch(120Hz)
- *        → low-shelf(-4dB) → noise gate → compressor → dest
+ * ANALYSIS of actual recordings confirmed these noise sources:
+ *   141 Hz — laptop fan motor (dominant persistent peak)
+ *   153 Hz — fan harmonic
+ *   379 Hz — cricket/laptop body mechanical resonance
+ *   424 Hz — cricket harmonic
+ *   50 Hz  — Philippines mains hum (PH grid = 50 Hz, NOT 60 Hz)
+ *   100 Hz — 2nd harmonic of 50 Hz mains
+ *
+ * IMPORTANT: YouTube/movie audio starts at ~610 Hz in this setup.
+ * HP must stay at 130 Hz max — raising it higher (e.g. 220 Hz) cuts
+ * real audio content. Notches handle everything above 130 Hz surgically.
+ *
+ * The noise gate is the primary defense — it profiles the noise floor in
+ * the first 1s and only passes signal that is VOICE_MARGIN dB above it.
+ * This silences the cricket completely during quiet moments in the audio.
+ *
+ * Chain: source → preBoost → gain → HP(130Hz) → notch(50Hz) → notch(100Hz)
+ *        → notch(141Hz) → notch(153Hz) → notch(379Hz) → notch(424Hz)
+ *        → noise gate → compressor → dest
  */
 function buildCallerChain(ctx, sourceNode, gainNode, dest) {
-  // 1. Pre-boost — loopback audio arrives at a lower level than mic
+  // 1. Pre-boost — loopback audio typically arrives lower than mic level
   const preBoost = ctx.createGain();
   preBoost.gain.value = 2.5;   // ~+8 dB baseline
 
-  // 2. High-pass at 80 Hz — removes sub-bass hum below voice range
+  // 2. High-pass at 130 Hz — removes sub-bass rumble; safe floor for YouTube/movie content
   const hp = ctx.createBiquadFilter();
   hp.type            = 'highpass';
-  hp.frequency.value = 80;
+  hp.frequency.value = 130;
   hp.Q.value         = 0.9;
 
-  // 3. Notch at 60 Hz — electrical mains hum (fundamental)
-  const notch60 = ctx.createBiquadFilter();
-  notch60.type            = 'notch';
-  notch60.frequency.value = 60;
-  notch60.Q.value         = 8;   // narrow Q = surgical cut, doesn't touch audio nearby
+  // 3. Notch at 50 Hz — Philippines mains hum fundamental (PH = 50 Hz grid)
+  const notch50 = ctx.createBiquadFilter();
+  notch50.type            = 'notch';
+  notch50.frequency.value = 50;
+  notch50.Q.value         = 10;
 
-  // 4. Notch at 120 Hz — confirmed dominant buzz tone (-21.5 dBFS in analysis)
-  //    This is the 2nd harmonic of mains hum, loudest tone in the recording.
-  const notch120 = ctx.createBiquadFilter();
-  notch120.type            = 'notch';
-  notch120.frequency.value = 120;
-  notch120.Q.value         = 10;  // very narrow — 120 Hz only, preserves voice above it
+  // 4. Notch at 100 Hz — 2nd harmonic of PH 50 Hz mains hum
+  const notch100 = ctx.createBiquadFilter();
+  notch100.type            = 'notch';
+  notch100.frequency.value = 100;
+  notch100.Q.value         = 8;
 
-  // 5. Notch at 180 Hz — 3rd harmonic, audible in analysis as secondary peak
-  const notch180 = ctx.createBiquadFilter();
-  notch180.type            = 'notch';
-  notch180.frequency.value = 180;
-  notch180.Q.value         = 6;
+  // 5. Notch at 141 Hz — dominant fan motor peak (strongest in noise-only analysis)
+  const notch141 = ctx.createBiquadFilter();
+  notch141.type            = 'notch';
+  notch141.frequency.value = 141;
+  notch141.Q.value         = 6;   // slightly wider — fan frequency drifts with RPM load
 
-  // 6. Low-shelf cut — reduce any remaining boominess from app audio
-  const mud = ctx.createBiquadFilter();
-  mud.type            = 'lowshelf';
-  mud.frequency.value = 200;
-  mud.gain.value      = -5;
+  // 6. Notch at 153 Hz — second fan harmonic cluster (153.5 Hz confirmed)
+  const notch153 = ctx.createBiquadFilter();
+  notch153.type            = 'notch';
+  notch153.frequency.value = 153;
+  notch153.Q.value         = 6;
 
-  // 7. Adaptive noise gate — same profiling approach as mic chain.
-  //    Prevents loopback hum from bleeding through during silence between audio.
-  //    Profile window: 1s. Opens only when signal is 8 dB above noise floor.
-  const bufSize       = 2048;
-  const gate          = ctx.createScriptProcessor(bufSize, 1, 1);
-  const PROFILE_BUFS  = Math.ceil(1.0 * (ctx.sampleRate || 48000) / bufSize);
-  const VOICE_MARGIN  = 8;
-  const HOLD_SEC      = 0.3;   // longer hold for music/YouTube — audio has natural gaps
-  const FADE_STEP     = 0.06;
+  // 7. Notch at 379 Hz — cricket/laptop body resonance (379 Hz confirmed in silence segments)
+  const notch379 = ctx.createBiquadFilter();
+  notch379.type            = 'notch';
+  notch379.frequency.value = 379;
+  notch379.Q.value         = 4;   // wider Q covers the 377–381 Hz cluster
+
+  // 8. Notch at 424 Hz — cricket harmonic (424.5 Hz confirmed in silence segments)
+  const notch424 = ctx.createBiquadFilter();
+  notch424.type            = 'notch';
+  notch424.frequency.value = 424;
+  notch424.Q.value         = 4;
+
+  // 9. Adaptive noise gate — profiles first 1s as noise floor baseline.
+  //    Opens ONLY when RMS is VOICE_MARGIN dB above that floor.
+  //    Cricket at ~-33 dBFS during silence; YouTube at ~-20 dBFS = 13 dB gap.
+  //    VOICE_MARGIN = 10 dB sits in the middle of that gap — gates cricket, passes audio.
+  //    HOLD_SEC extended to 0.5s — music/YouTube has natural pauses; hold prevents cutouts.
+  const bufSize      = 2048;
+  const gate         = ctx.createScriptProcessor(bufSize, 1, 1);
+  const PROFILE_BUFS = Math.ceil(1.0 * (ctx.sampleRate || 48000) / bufSize);
+  const VOICE_MARGIN = 10;
+  const HOLD_SEC     = 0.5;   // longer hold — music has rests; don't cut mid-phrase
+  const FADE_STEP    = 0.04;  // slower fade — smoother open/close on continuous audio
 
   let profileCount  = 0;
   let noiseRmsSum   = 0;
@@ -406,7 +448,7 @@ function buildCallerChain(ctx, sourceNode, gainNode, dest) {
     for (let i = 0; i < input.length; i++) output[i] = input[i] * gateGain;
   };
 
-  // 8. Compressor — gentle, keeps caller voices and YouTube audio natural
+  // 10. Compressor — gentle, preserves natural dynamics of voices and music
   const comp = ctx.createDynamicsCompressor();
   comp.threshold.value = -16;
   comp.knee.value      = 10;
@@ -414,15 +456,18 @@ function buildCallerChain(ctx, sourceNode, gainNode, dest) {
   comp.attack.value    = 0.005;
   comp.release.value   = 0.4;
 
-  // Wire: source → preBoost → gain → hp → notch60 → notch120 → notch180 → mud → gate → comp → dest
+  // Wire: source → preBoost → gain → hp → notch50 → notch100 → notch141
+  //       → notch153 → notch379 → notch424 → gate → comp → dest
   sourceNode.connect(preBoost);
   preBoost.connect(gainNode);
   gainNode.connect(hp);
-  hp.connect(notch60);
-  notch60.connect(notch120);
-  notch120.connect(notch180);
-  notch180.connect(mud);
-  mud.connect(gate);
+  hp.connect(notch50);
+  notch50.connect(notch100);
+  notch100.connect(notch141);
+  notch141.connect(notch153);
+  notch153.connect(notch379);
+  notch379.connect(notch424);
+  notch424.connect(gate);
   gate.connect(comp);
   comp.connect(dest);
 
