@@ -349,6 +349,48 @@ html, body {
 .hint-steps strong { color: var(--accent); }
 .hint-steps em { color: #aaa; font-style: normal; }
 
+/* ===== AMP ROWS ===== */
+/* Container: two amp groups side by side */
+.amp-row {
+  display: flex; gap: 16px;
+  margin-top: 16px; padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+/* Each group: label + buttons stacked */
+.amp-group {
+  display: flex; flex-direction: column; gap: 6px; flex: 1;
+}
+/* Small uppercase label above buttons */
+.amp-label {
+  font-size: 9px; letter-spacing: 3px; color: var(--muted);
+  font-family: var(--font-display); font-weight: 600;
+}
+/* Button strip */
+.amp-btns {
+  display: flex; gap: 4px;
+}
+/* Individual amp button */
+.amp-btn {
+  flex: 1; padding: 6px 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 1px;
+  border-radius: 2px; cursor: pointer;
+  transition: all .15s;
+}
+.amp-btn:hover {
+  border-color: #444; color: var(--text);
+}
+/* Active / selected state — accent yellow, same pattern as src-btn.active */
+.amp-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(232,255,71,.08);
+  font-weight: 700;
+}
+/* x1 active gets a subtle "DEFAULT" feel — no extra treatment needed beyond above */
+
 /* ===== SCROLLBAR ===== */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -178,50 +178,252 @@ function stopTimer() { clearInterval(timerInterval); timerInterval = null; }
 // CALLER skips the LowShelf(-6dB) mud cut — loopback/tab audio is already
 // processed by the call app and doesn't have the low-end boominess a raw mic has.
 // Removing the -6dB cut recovers significant perceived volume on the caller side.
-function buildVoiceChain(ctx, sourceNode, gainNode, dest, isCaller) {
-  // 1. Gain first — user volume control before any processing
-  gainNode.connect; // already created outside, wired below
+/* ── buildMicChain ──────────────────────────────────────────────────────────
+ * Aggressive noise suppression for microphone input.
+ * Goal: eliminate laptop fan hum, keyboard clicks, and mechanical noise.
+ * Passes only the human voice frequency range (150 Hz – 8 kHz).
+ *
+ * Chain: source → gain → HP(150Hz) → HP(150Hz) → notch(380Hz keyboard thud)
+ *        → mud cut(200Hz -10dB) → presence boost(3kHz) → air(8kHz)
+ *        → noise gate → compressor → dest
+ */
+function buildMicChain(ctx, sourceNode, gainNode, dest) {
+  // 1. Dual high-pass at 150 Hz — frequency analysis shows fan body at 80-200 Hz;
+  //    stacked filters create a steeper rolloff to kill it completely
+  const hp1 = ctx.createBiquadFilter();
+  hp1.type            = 'highpass';
+  hp1.frequency.value = 150;
+  hp1.Q.value         = 1.0;
 
-  // 2. High-pass: cut rumble below 80Hz
-  const hp = ctx.createBiquadFilter();
-  hp.type            = 'highpass';
-  hp.frequency.value = 80;
-  hp.Q.value         = 0.7;
+  const hp2 = ctx.createBiquadFilter();
+  hp2.type            = 'highpass';
+  hp2.frequency.value = 150;
+  hp2.Q.value         = 1.0;
 
-  // 3. Low-shelf mud cut — MIC only (caller audio is already processed by call app)
+  // 2. Low-pass ceiling at 8000 Hz — above voice range; kills hiss and high-freq fan whine
+  const lp = ctx.createBiquadFilter();
+  lp.type            = 'lowpass';
+  lp.frequency.value = 8000;
+  lp.Q.value         = 0.7;
+
+  // 3. Notch at 380 Hz — keyboard mechanical thud resonance lives here
+  const notch = ctx.createBiquadFilter();
+  notch.type            = 'notch';
+  notch.frequency.value = 380;
+  notch.Q.value         = 2.5;
+
+  // 4. Low-shelf mud cut — reduce boxy 200 Hz buildup from room acoustics
   const mud = ctx.createBiquadFilter();
   mud.type            = 'lowshelf';
   mud.frequency.value = 200;
-  mud.gain.value      = isCaller ? 0 : -6;  // skip cut for caller
+  mud.gain.value      = -10;
 
-  // 4. Peaking: boost presence at 3kHz
+  // 5. Presence boost at 2.5 kHz — makes voice cut through clearly
   const presence = ctx.createBiquadFilter();
   presence.type            = 'peaking';
-  presence.frequency.value = 3000;
-  presence.Q.value         = 1.0;
-  presence.gain.value      = 4;
+  presence.frequency.value = 2500;
+  presence.Q.value         = 1.2;
+  presence.gain.value      = 5;
 
-  // 5. High-shelf: add air above 6kHz
+  // 6. Air shelf at 8 kHz — slight lift for clarity without hiss
   const air = ctx.createBiquadFilter();
   air.type            = 'highshelf';
-  air.frequency.value = 6000;
-  air.gain.value      = 3;
+  air.frequency.value = 8000;
+  air.gain.value      = 2;
 
-  // 6. Compressor last — limits peaks AFTER gain boost, prevents clipping
+  // 7. Adaptive noise gate with noise-floor profiling
+  //    Phase 1 (first 1.5s): silently measure the noise floor RMS (fan, room hum).
+  //    Phase 2 (recording): gate opens only when signal is VOICE_MARGIN dB above
+  //    the measured noise floor — so fan noise never opens the gate even if loud.
+  //    Hold prevents chopped syllables. Soft fade avoids clicks on open/close.
+  const bufSize = 2048;
+  const gate    = ctx.createScriptProcessor(bufSize, 1, 1);
+
+  const PROFILE_BUFS  = Math.ceil(1.5 * (ctx.sampleRate || 48000) / bufSize); // ~1.5s
+  const VOICE_MARGIN  = 10;   // dB above noise floor required to open gate
+  const HOLD_SEC      = 0.20; // seconds to hold gate open after voice drops
+  const FADE_STEP     = 0.08; // gain step per buffer for soft open/close (avoids clicks)
+
+  let profileCount  = 0;
+  let noiseRmsSum   = 0;
+  let noiseFloorRms = 0.0015; // conservative fallback (~-56 dBFS)
+  let holdCount     = 0;
+  let holdSamples   = Math.round(HOLD_SEC * (ctx.sampleRate || 48000) / bufSize);
+  let gateGain      = 0;      // current output gain (0=closed, 1=open), faded smoothly
+
+  gate.onaudioprocess = e => {
+    const input  = e.inputBuffer.getChannelData(0);
+    const output = e.outputBuffer.getChannelData(0);
+
+    // RMS of this buffer
+    let sum = 0;
+    for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+    const rms = Math.sqrt(sum / input.length);
+
+    // Phase 1: build noise floor profile from first PROFILE_BUFS buffers
+    if (profileCount < PROFILE_BUFS) {
+      noiseRmsSum += rms;
+      profileCount++;
+      if (profileCount === PROFILE_BUFS) {
+        noiseFloorRms = (noiseRmsSum / PROFILE_BUFS) * 1.2; // +20% safety margin
+      }
+      output.fill(0); // mute during profiling
+      return;
+    }
+
+    // Phase 2: open gate only when rms is VOICE_MARGIN dB above noise floor
+    const threshold = noiseFloorRms * Math.pow(10, VOICE_MARGIN / 20);
+    if (rms > threshold) {
+      holdCount = holdSamples;  // voice detected — open gate, reset hold timer
+    } else if (holdCount > 0) {
+      holdCount--;              // hold open — trailing syllables / breath
+    }
+
+    // Soft fade — ramp gain up/down by FADE_STEP to avoid click artifacts
+    const targetGain = holdCount > 0 ? 1 : 0;
+    gateGain = gateGain < targetGain
+      ? Math.min(gateGain + FADE_STEP, 1)
+      : Math.max(gateGain - FADE_STEP, 0);
+
+    for (let i = 0; i < input.length; i++) output[i] = input[i] * gateGain;
+  };
+
+  // 8. Compressor — normalize voice dynamics, prevent clipping
   const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -18;  // raised from -24 so quieter signals aren't squashed
-  comp.knee.value      = 8;
-  comp.ratio.value     = 3;    // gentler ratio so boost is more audible
-  comp.attack.value    = 0.005;
-  comp.release.value   = 0.3;
+  comp.threshold.value = -20;
+  comp.knee.value      = 6;
+  comp.ratio.value     = 4;
+  comp.attack.value    = 0.003;
+  comp.release.value   = 0.25;
 
-  // Wire: source → gain → hp → mud → presence → air → comp → dest
+  // Wire: source → gain → hp1 → hp2 → lp → notch → mud → presence → air → gate → comp → dest
   sourceNode.connect(gainNode);
-  gainNode.connect(hp);
-  hp.connect(mud);
+  gainNode.connect(hp1);
+  hp1.connect(hp2);
+  hp2.connect(lp);
+  lp.connect(notch);
+  notch.connect(mud);
   mud.connect(presence);
   presence.connect(air);
-  air.connect(comp);
+  air.connect(gate);
+  gate.connect(comp);
+  comp.connect(dest);
+
+  return comp;
+}
+
+/* ── buildCallerChain ───────────────────────────────────────────────────────
+ * Processes caller / app audio (VB-Cable, tab audio, YouTube).
+ * Analysis of recorded audio confirmed a constant -21.5 dBFS tone at 120 Hz
+ * (electrical ground loop hum from earphone cable into loopback device).
+ * 120 Hz is 10 dB louder than the YouTube signal — it must be notched out.
+ *
+ * Chain: source → preBoost → gain → HP(80Hz) → notch(60Hz) → notch(120Hz)
+ *        → low-shelf(-4dB) → noise gate → compressor → dest
+ */
+function buildCallerChain(ctx, sourceNode, gainNode, dest) {
+  // 1. Pre-boost — loopback audio arrives at a lower level than mic
+  const preBoost = ctx.createGain();
+  preBoost.gain.value = 2.5;   // ~+8 dB baseline
+
+  // 2. High-pass at 80 Hz — removes sub-bass hum below voice range
+  const hp = ctx.createBiquadFilter();
+  hp.type            = 'highpass';
+  hp.frequency.value = 80;
+  hp.Q.value         = 0.9;
+
+  // 3. Notch at 60 Hz — electrical mains hum (fundamental)
+  const notch60 = ctx.createBiquadFilter();
+  notch60.type            = 'notch';
+  notch60.frequency.value = 60;
+  notch60.Q.value         = 8;   // narrow Q = surgical cut, doesn't touch audio nearby
+
+  // 4. Notch at 120 Hz — confirmed dominant buzz tone (-21.5 dBFS in analysis)
+  //    This is the 2nd harmonic of mains hum, loudest tone in the recording.
+  const notch120 = ctx.createBiquadFilter();
+  notch120.type            = 'notch';
+  notch120.frequency.value = 120;
+  notch120.Q.value         = 10;  // very narrow — 120 Hz only, preserves voice above it
+
+  // 5. Notch at 180 Hz — 3rd harmonic, audible in analysis as secondary peak
+  const notch180 = ctx.createBiquadFilter();
+  notch180.type            = 'notch';
+  notch180.frequency.value = 180;
+  notch180.Q.value         = 6;
+
+  // 6. Low-shelf cut — reduce any remaining boominess from app audio
+  const mud = ctx.createBiquadFilter();
+  mud.type            = 'lowshelf';
+  mud.frequency.value = 200;
+  mud.gain.value      = -5;
+
+  // 7. Adaptive noise gate — same profiling approach as mic chain.
+  //    Prevents loopback hum from bleeding through during silence between audio.
+  //    Profile window: 1s. Opens only when signal is 8 dB above noise floor.
+  const bufSize       = 2048;
+  const gate          = ctx.createScriptProcessor(bufSize, 1, 1);
+  const PROFILE_BUFS  = Math.ceil(1.0 * (ctx.sampleRate || 48000) / bufSize);
+  const VOICE_MARGIN  = 8;
+  const HOLD_SEC      = 0.3;   // longer hold for music/YouTube — audio has natural gaps
+  const FADE_STEP     = 0.06;
+
+  let profileCount  = 0;
+  let noiseRmsSum   = 0;
+  let noiseFloorRms = 0.001;
+  let holdCount     = 0;
+  let holdSamples   = Math.round(HOLD_SEC * (ctx.sampleRate || 48000) / bufSize);
+  let gateGain      = 0;
+
+  gate.onaudioprocess = e => {
+    const input  = e.inputBuffer.getChannelData(0);
+    const output = e.outputBuffer.getChannelData(0);
+    let sum = 0;
+    for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+    const rms = Math.sqrt(sum / input.length);
+
+    if (profileCount < PROFILE_BUFS) {
+      noiseRmsSum += rms;
+      profileCount++;
+      if (profileCount === PROFILE_BUFS) {
+        noiseFloorRms = (noiseRmsSum / PROFILE_BUFS) * 1.2;
+      }
+      output.fill(0);
+      return;
+    }
+
+    const threshold = noiseFloorRms * Math.pow(10, VOICE_MARGIN / 20);
+    if (rms > threshold) {
+      holdCount = holdSamples;
+    } else if (holdCount > 0) {
+      holdCount--;
+    }
+
+    const targetGain = holdCount > 0 ? 1 : 0;
+    gateGain = gateGain < targetGain
+      ? Math.min(gateGain + FADE_STEP, 1)
+      : Math.max(gateGain - FADE_STEP, 0);
+
+    for (let i = 0; i < input.length; i++) output[i] = input[i] * gateGain;
+  };
+
+  // 8. Compressor — gentle, keeps caller voices and YouTube audio natural
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -16;
+  comp.knee.value      = 10;
+  comp.ratio.value     = 2.5;
+  comp.attack.value    = 0.005;
+  comp.release.value   = 0.4;
+
+  // Wire: source → preBoost → gain → hp → notch60 → notch120 → notch180 → mud → gate → comp → dest
+  sourceNode.connect(preBoost);
+  preBoost.connect(gainNode);
+  gainNode.connect(hp);
+  hp.connect(notch60);
+  notch60.connect(notch120);
+  notch120.connect(notch180);
+  notch180.connect(mud);
+  mud.connect(gate);
+  gate.connect(comp);
   comp.connect(dest);
 
   return comp;
@@ -241,21 +443,13 @@ function buildAudioPipeline(micStreamIn, callerStreamIn) {
 
   if (micStreamIn && micStreamIn.getAudioTracks().length > 0) {
     const src  = audioCtx.createMediaStreamSource(micStreamIn);
-    const comp = buildVoiceChain(audioCtx, src, micGain, dest, false);
+    const comp = buildMicChain(audioCtx, src, micGain, dest);
     comp.connect(micAnalyser);
   }
 
   if (callerStreamIn && callerStreamIn.getAudioTracks().length > 0) {
-    const src = audioCtx.createMediaStreamSource(callerStreamIn);
-    // Pre-boost: caller audio enters at a lower level than mic (no hardware AGC).
-    // +8dB fixed boost before the voice chain to match baseline levels.
-    // This is separate from callerGain (the user slider) — it's a fixed offset.
-    const preBoost = audioCtx.createGain();
-    preBoost.gain.value = 2.5; // ~+8dB baseline
-    src.connect(preBoost);
-    // buildVoiceChain expects a real AudioNode as source — pass preBoost as the source
-    // by temporarily wrapping: source → preBoost → gainNode → EQ → comp → dest
-    const comp = buildVoiceChain(audioCtx, preBoost, callerGain, dest, true);
+    const src  = audioCtx.createMediaStreamSource(callerStreamIn);
+    const comp = buildCallerChain(audioCtx, src, callerGain, dest);
     comp.connect(sysAnalyser);
   }
 
@@ -336,11 +530,11 @@ btnStart.addEventListener('click', async () => {
           audio: {
             echoCancellation:    true,
             noiseSuppression:    true,
-            autoGainControl:     false, // OFF — hardware AGC inflates mic before WebAudio;
-                                        // the volume slider handles gain uniformly for both tracks
+            autoGainControl:     false,
             channelCount:        1,
             sampleRate:          48000,
-            sampleSize:          16
+            sampleSize:          16,
+            latency:             0       // request lowest latency buffer from browser
           },
           video: false
         });
@@ -611,3 +805,40 @@ if (!navigator.mediaDevices?.getDisplayMedia) {
   btnStart.disabled = true;
   alert('Your browser does not support screen capture.\nPlease use Chrome, Edge, or Firefox.');
 }
+/* ===== AMP BUTTONS — x1 to x5 multiplier on top of volume slider =====
+ * Each group of buttons toggles an .active class on click.
+ * The selected multiplier is applied directly to the GainNode value,
+ * factored together with the current volume slider percentage.
+ */
+(function initAmpButtons() {
+  let micAmp    = 1;
+  let callerAmp = 1;
+
+  /* Wire a set of amp buttons; returns setter fn for the multiplier */
+  function wireGroup(containerId, onChange) {
+    const container = document.getElementById(containerId);
+    container.querySelectorAll('.amp-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        container.querySelectorAll('.amp-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        onChange(parseInt(btn.dataset.val, 10));
+      });
+    });
+  }
+
+  wireGroup('micAmpBtns', val => {
+    micAmp = val;
+    if (micGain) {
+      const sliderPct = parseInt(micVolumeSlider.value, 10) / 100;
+      micGain.gain.setTargetAtTime(sliderPct * micAmp, audioCtx.currentTime, 0.01);
+    }
+  });
+
+  wireGroup('callerAmpBtns', val => {
+    callerAmp = val;
+    if (callerGain) {
+      const sliderPct = parseInt(callerVolumeSlider.value, 10) / 100;
+      callerGain.gain.setTargetAtTime(sliderPct * callerAmp, audioCtx.currentTime, 0.01);
+    }
+  });
+})();
