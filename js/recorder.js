@@ -840,12 +840,18 @@ function stopRecording() {
 }
 
 // ── SAVE — with format handling + seekable fix ────────
+/* ── saveRecording ──────────────────────────────────────────────────────────
+ * Routes recorded chunks to the correct save path based on chosen format.
+ * WEBM: ts-ebml patches Duration + Cues into the WebM container (fast, in-browser).
+ * MP4:  ffmpeg.wasm remuxes WebM → true MP4 with moov atom duration written correctly.
+ *       This is required because Windows Media Player, iPhone, and Android players
+ *       cannot read duration from a WebM container renamed to .mp4.
+ * MP3:  Audio-only opus stream saved directly as .mp3.
+ */
 async function saveRecording(chosenFormat, mimeType) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
   if (chosenFormat === 'mp3') {
-    // Audio-only opus stream saved as .mp3
-    // MIME must be audio/webm — not audio/mpeg — so the browser plays it back correctly
     const blob = new Blob(recordedChunks, { type: 'audio/webm;codecs=opus' });
     const url  = URL.createObjectURL(blob);
     const name = `vcrec-${ts}.mp3`;
@@ -854,74 +860,91 @@ async function saveRecording(chosenFormat, mimeType) {
     return;
   }
 
-  // Video formats — inject seekable metadata via ts-ebml
-  const rawBlob = new Blob(recordedChunks, { type: 'video/webm' });
-  const ext     = chosenFormat === 'mp4' ? 'mp4' : 'webm';
-  const name    = `vcrec-${ts}.${ext}`;
+  const rawBlob    = new Blob(recordedChunks, { type: 'video/webm' });
+  const durationMs = elapsedSeconds * 1000;
 
+  if (chosenFormat === 'mp4') {
+    // True MP4 remux via ffmpeg.wasm — produces a real .mp4 with moov atom duration.
+    // Windows Media Player, VLC, iPhone, Android all read duration correctly from moov.
+    setStatus('PROCESSING MP4…', '');
+    try {
+      const name = `vcrec-${ts}.mp4`;
+      const mp4Blob = await remuxToMp4(rawBlob);
+      const url     = URL.createObjectURL(mp4Blob);
+      addToList(name, mp4Blob.size, url, 'MP4');
+      triggerDownload(url, name);
+    } catch (e) {
+      console.warn('ffmpeg remux failed, falling back to seekable WebM saved as .mp4:', e);
+      // Fallback: ts-ebml seekable webm renamed to .mp4 — better than nothing
+      try {
+        const seekableBlob = await makeSeekable(rawBlob, durationMs);
+        const finalBlob    = new Blob([await seekableBlob.arrayBuffer()], { type: 'video/mp4' });
+        const url          = URL.createObjectURL(finalBlob);
+        const name         = `vcrec-${ts}.mp4`;
+        addToList(name, finalBlob.size, url, 'MP4');
+        triggerDownload(url, name);
+      } catch (e2) {
+        const url  = URL.createObjectURL(rawBlob);
+        const name = `vcrec-${ts}.mp4`;
+        addToList(name, rawBlob.size, url, 'MP4');
+        triggerDownload(url, name);
+      }
+    }
+    setStatus('IDLE', '');
+    return;
+  }
+
+  // WEBM — ts-ebml seekable patch (fast, no wasm needed)
+  const name = `vcrec-${ts}.webm`;
   try {
-    // Pass real elapsed duration in ms so EBML Duration field is correct.
-    // elapsedSeconds is tracked by the timer — multiply by 1000 for milliseconds.
-    const durationMs   = elapsedSeconds * 1000;
     const seekableBlob = await makeSeekable(rawBlob, durationMs);
-    // For MP4: file is a seekable WebM container saved with .mp4 extension.
-    // Most players (VLC, Windows Media Player, MX Player) handle this correctly
-    // once the Duration + Cues metadata is present and valid.
-    const finalBlob = new Blob([await seekableBlob.arrayBuffer()],
-      { type: chosenFormat === 'mp4' ? 'video/mp4' : 'video/webm' });
-    const url = URL.createObjectURL(finalBlob);
-    addToList(name, finalBlob.size, url, ext.toUpperCase());
+    const url          = URL.createObjectURL(seekableBlob);
+    addToList(name, seekableBlob.size, url, 'WEBM');
     triggerDownload(url, name);
   } catch (e) {
-    console.warn('Seekable fix failed, saving raw:', e);
     const url = URL.createObjectURL(rawBlob);
-    addToList(name, rawBlob.size, url, ext.toUpperCase());
+    addToList(name, rawBlob.size, url, 'WEBM');
     triggerDownload(url, name);
   }
 }
 
-/* ── makeSeekable ───────────────────────────────────────────────────────────
- * Injects Duration + Cues into a WebM blob so players can seek.
- * PROBLEM: MediaRecorder never writes a Duration field into the WebM stream,
- *          so reader2.duration is always NaN/0 → players can't seek.
- * FIX:     Accept knownDurationMs from the elapsed timer and forcefully patch
- *          it into the EBML metadata, overriding the missing/zero value.
- *          This gives players the real duration → seeking works correctly.
+/* ── remuxToMp4 ─────────────────────────────────────────────────────────────
+ * Uses ffmpeg.wasm to remux the raw WebM blob into a true MP4 container.
+ * HOW IT WORKS:
+ *   1. Load ffmpeg.wasm single-thread core via toBlobURL (bypasses CORS + worker path issues).
+ *   2. Write raw WebM bytes into ffmpeg's virtual filesystem as input.webm.
+ *   3. Run: ffmpeg -i input.webm -c copy -movflags +faststart output.mp4
+ *      -c copy:              stream copy — no re-encode, fast, lossless.
+ *      -movflags +faststart: moves moov atom to front of file.
+ *      ffmpeg writes correct duration into moov — all players can seek.
+ *   4. Read output.mp4 back out and return as a Blob.
  */
-function makeSeekable(blob, knownDurationMs) {
-  return new Promise((resolve, reject) => {
-    const reader  = new FileReader();
-    reader.onload = () => {
-      try {
-        const buf     = reader.result;
-        const decoder = new EBML.Decoder();
-        const reader2 = new EBML.Reader();
-        reader2.logging              = false;
-        reader2.drop_default_duration = false;
+async function remuxToMp4(webmBlob) {
+  const { FFmpeg }    = FFmpegWASM;
+  const { toBlobURL, fetchFile } = FFmpegUtil;
 
-        const elms = decoder.decode(buf);
-        elms.forEach(e => reader2.read(e));
-        reader2.stop();
+  const ff = new FFmpeg();
 
-        // Use the known real duration — reader2.duration is unreliable (often NaN)
-        // WebM timecode scale default is 1,000,000 ns/tick = 1 ms per tick
-        const durationMs = (knownDurationMs && knownDurationMs > 0)
-          ? knownDurationMs
-          : (isFinite(reader2.duration) && reader2.duration > 0 ? reader2.duration : 0);
-
-        const refined = EBML.tools.makeMetadataSeekable(
-          reader2.metadatas, durationMs, reader2.cues
-        );
-        const body        = buf.slice(reader2.metadataSize);
-        const seekableBlob = new Blob([refined, body], { type: 'video/webm' });
-        resolve(seekableBlob);
-      } catch (err) {
-        reject(err);
-      }
-    };
-    reader.onerror = reject;
-    reader.readAsArrayBuffer(blob);
+  const coreBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+  await ff.load({
+    coreURL: await toBlobURL(`${coreBase}/ffmpeg-core.js`,   'text/javascript'),
+    wasmURL: await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, 'application/wasm'),
   });
+
+  const inputData = await fetchFile(webmBlob);
+  await ff.writeFile('input.webm', inputData);
+
+  // -c copy: no re-encode — remux only (fast + lossless quality)
+  // -movflags +faststart: moov atom at front → duration readable immediately
+  await ff.exec([
+    '-i', 'input.webm',
+    '-c', 'copy',
+    '-movflags', '+faststart',
+    'output.mp4'
+  ]);
+
+  const data = await ff.readFile('output.mp4');
+  return new Blob([data.buffer], { type: 'video/mp4' });
 }
 
 function triggerDownload(url, name) {

@@ -218,8 +218,11 @@
 
   </main>
 
-  <!-- ts-ebml: injects duration + cues into WebM so the file is seekable -->
+  <!-- ts-ebml: injects duration + cues into WebM so WEBM files are seekable -->
   <script src="https://cdn.jsdelivr.net/npm/ts-ebml@2.0.2/lib/index.js"></script>
+  <!-- ffmpeg.wasm: true MP4 remux — writes real moov atom with duration so all players can seek -->
+  <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/umd/ffmpeg.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
   <script src="js/recorder.js"></script>
 </body>
 </html>
