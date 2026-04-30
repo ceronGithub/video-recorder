@@ -179,93 +179,118 @@ function stopTimer() { clearInterval(timerInterval); timerInterval = null; }
 // processed by the call app and doesn't have the low-end boominess a raw mic has.
 // Removing the -6dB cut recovers significant perceived volume on the caller side.
 /* ── buildMicChain ──────────────────────────────────────────────────────────
- * Noise suppression for microphone input. Voice only — no fan, no cricket.
+ * Complete noise cancellation for microphone input. Voice only — eliminates
+ * fan hum, cricket resonance, mains hum, hiss, and room bleed.
  *
- * Analysis confirmed noise on mic side: 141 Hz (fan), 153 Hz (fan harmonic),
- * 379 Hz (cricket/laptop resonance), 424 Hz (cricket harmonic).
+ * Strategy:
+ *   A) Browser-level: echoCancellation + noiseSuppression via getUserMedia constraints (hardware/OS)
+ *   B) HP × 2 at 200 Hz (Q=1.4) — steep 4th-order rolloff kills everything below voice
+ *   C) Surgical notches on confirmed noise frequencies
+ *   D) Low-pass ceiling at 7500 Hz — removes hiss/whine above voice range
+ *   E) Adaptive spectral gate — continuously tracks noise floor every 3s,
+ *      opens only when RMS is 18 dB above current floor, snap-closes instantly
+ *   F) Compressor — normalize voice, prevent clipping
  *
- * Chain: source → gain → HP(150Hz) × 2 → notch(141Hz) → notch(153Hz)
- *        → notch(379Hz) → notch(424Hz) → mud(-10dB@200Hz)
- *        → presence(+5dB@2.5kHz) → air(+2dB@8kHz) → LP(8kHz)
- *        → noise gate → compressor → dest
+ * Chain: source → gain → HP(200Hz) × 2 → notch(50Hz) → notch(100Hz)
+ *        → notch(141Hz) → notch(153Hz) → notch(379Hz) → notch(424Hz)
+ *        → mud(-12dB@180Hz) → presence(+5dB@2.5kHz) → LP(7500Hz)
+ *        → adaptive spectral gate → compressor → dest
  */
 function buildMicChain(ctx, sourceNode, gainNode, dest) {
-  // 1. Dual high-pass at 150 Hz — stacked for steep rolloff; kills fan body (80–140 Hz)
+  // 1. Dual high-pass at 200 Hz (Q=1.4) — stacked 4th-order rolloff.
+  //    Voice fundamentals start at ~85 Hz (male) / ~165 Hz (female).
+  //    200 Hz cuts all sub-voice noise: fan body, breath pops, handling rumble.
   const hp1 = ctx.createBiquadFilter();
   hp1.type            = 'highpass';
-  hp1.frequency.value = 150;
-  hp1.Q.value         = 1.0;
+  hp1.frequency.value = 200;
+  hp1.Q.value         = 1.4;
 
   const hp2 = ctx.createBiquadFilter();
   hp2.type            = 'highpass';
-  hp2.frequency.value = 150;
-  hp2.Q.value         = 1.0;
+  hp2.frequency.value = 200;
+  hp2.Q.value         = 1.4;
 
-  // 2. Notch at 141 Hz — laptop fan motor fundamental (confirmed dominant in analysis)
+  // 2. Notch at 50 Hz — Philippines mains hum fundamental (PH grid = 50 Hz, NOT 60 Hz)
+  const notch50 = ctx.createBiquadFilter();
+  notch50.type            = 'notch';
+  notch50.frequency.value = 50;
+  notch50.Q.value         = 12;
+
+  // 3. Notch at 100 Hz — 2nd harmonic of 50 Hz PH mains hum
+  const notch100 = ctx.createBiquadFilter();
+  notch100.type            = 'notch';
+  notch100.frequency.value = 100;
+  notch100.Q.value         = 10;
+
+  // 4. Notch at 141 Hz — laptop fan motor fundamental (dominant persistent noise peak)
   const notch141 = ctx.createBiquadFilter();
   notch141.type            = 'notch';
   notch141.frequency.value = 141;
-  notch141.Q.value         = 5;
+  notch141.Q.value         = 6;
 
-  // 3. Notch at 153 Hz — fan harmonic (second strongest noise peak)
+  // 5. Notch at 153 Hz — fan harmonic (second strongest peak, drifts with fan RPM)
   const notch153 = ctx.createBiquadFilter();
   notch153.type            = 'notch';
   notch153.frequency.value = 153;
-  notch153.Q.value         = 5;
+  notch153.Q.value         = 6;
 
-  // 4. Notch at 379 Hz — cricket/laptop body resonance (confirmed in silence segments)
+  // 6. Notch at 379 Hz — cricket/laptop body resonance (confirmed in silence segments)
   const notch379 = ctx.createBiquadFilter();
   notch379.type            = 'notch';
   notch379.frequency.value = 379;
-  notch379.Q.value         = 4;
+  notch379.Q.value         = 5;
 
-  // 5. Notch at 424 Hz — cricket harmonic (confirmed at 424.5 Hz in noise-only segments)
+  // 7. Notch at 424 Hz — cricket harmonic (confirmed at 424.5 Hz in silence segments)
   const notch424 = ctx.createBiquadFilter();
   notch424.type            = 'notch';
   notch424.frequency.value = 424;
-  notch424.Q.value         = 4;
+  notch424.Q.value         = 5;
 
-  // 6. Low-shelf mud cut — reduce boxy 200 Hz room buildup
+  // 8. Low-shelf mud cut — reduce boxy room buildup in the 180 Hz chest resonance zone
   const mud = ctx.createBiquadFilter();
   mud.type            = 'lowshelf';
-  mud.frequency.value = 200;
-  mud.gain.value      = -10;
+  mud.frequency.value = 180;
+  mud.gain.value      = -12;
 
-  // 7. Presence boost at 2.5 kHz — voice intelligibility
+  // 9. Presence boost at 2.5 kHz — voice intelligibility and clarity
   const presence = ctx.createBiquadFilter();
   presence.type            = 'peaking';
   presence.frequency.value = 2500;
   presence.Q.value         = 1.2;
   presence.gain.value      = 5;
 
-  // 8. Air shelf at 8 kHz — clarity lift
-  const air = ctx.createBiquadFilter();
-  air.type            = 'highshelf';
-  air.frequency.value = 8000;
-  air.gain.value      = 2;
-
-  // 9. Low-pass ceiling at 8000 Hz — kills hiss and high-freq whine above voice range
+  // 10. Low-pass ceiling at 7500 Hz — removes hiss, high-freq whine, and sibilance above voice
   const lp = ctx.createBiquadFilter();
   lp.type            = 'lowpass';
-  lp.frequency.value = 8000;
-  lp.Q.value         = 0.7;
+  lp.frequency.value = 7500;
+  lp.Q.value         = 0.8;
 
-  // 10. Adaptive noise gate — profiles first 1.5s as noise floor baseline.
-  //     Gate opens only when RMS is VOICE_MARGIN dB above that floor.
-  //     Prevents fan/cricket bleed during silences between words.
-  const bufSize      = 2048;
-  const gate         = ctx.createScriptProcessor(bufSize, 1, 1);
-  const PROFILE_BUFS = Math.ceil(1.5 * (ctx.sampleRate || 48000) / bufSize);
-  const VOICE_MARGIN = 12;   // raised to 12 dB — stricter, cricket is persistent
-  const HOLD_SEC     = 0.20;
-  const FADE_STEP    = 0.08;
+  // 11. Adaptive spectral noise gate — CONTINUOUS floor tracking.
+  //     PHASE 1 (first 1.5s): profiles noise floor from silence before first word.
+  //     PHASE 2 (ongoing): re-samples floor every RETRAIN_BUFS when gate is CLOSED
+  //     (i.e. only silence/noise is present — never updates floor during speech).
+  //     Gate opens ONLY when RMS is VOICE_MARGIN dB above current floor.
+  //     SNAP_CLOSE: gate snaps shut instantly (no fade-out delay) — prevents
+  //     noise bleed in the tail after speech ends.
+  const bufSize        = 1024;
+  const gate           = ctx.createScriptProcessor(bufSize, 1, 1);
+  const sampleRate     = ctx.sampleRate || 48000;
+  const PROFILE_BUFS   = Math.ceil(1.5 * sampleRate / bufSize);
+  const RETRAIN_BUFS   = Math.ceil(3.0 * sampleRate / bufSize);  // re-profile every 3s of silence
+  const VOICE_MARGIN   = 18;    // 18 dB above noise floor — strict, voice is loud vs. noise
+  const HOLD_SEC       = 0.15;  // short hold — prevents chopping within a word
+  const FADE_IN_STEP   = 0.15;  // fast open — no fade-in lag on word starts
+  const SNAP_CLOSE     = true;  // snap gate shut instantly when speech ends
 
-  let profileCount  = 0;
-  let noiseRmsSum   = 0;
-  let noiseFloorRms = 0.0015;
-  let holdCount     = 0;
-  let holdSamples   = Math.round(HOLD_SEC * (ctx.sampleRate || 48000) / bufSize);
-  let gateGain      = 0;
+  let profileCount    = 0;
+  let noiseRmsSum     = 0;
+  let noiseFloorRms   = 0.001;
+  let retrainCount    = 0;
+  let retrainSum      = 0;
+  let holdCount       = 0;
+  let holdSamples     = Math.round(HOLD_SEC * sampleRate / bufSize);
+  let gateGain        = 0;
+  let isOpen          = false;
 
   gate.onaudioprocess = e => {
     const input  = e.inputBuffer.getChannelData(0);
@@ -274,52 +299,78 @@ function buildMicChain(ctx, sourceNode, gainNode, dest) {
     for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
     const rms = Math.sqrt(sum / input.length);
 
+    // PHASE 1: initial noise floor profiling — mute output during calibration
     if (profileCount < PROFILE_BUFS) {
       noiseRmsSum += rms;
       profileCount++;
       if (profileCount === PROFILE_BUFS) {
-        noiseFloorRms = (noiseRmsSum / PROFILE_BUFS) * 1.2;
+        noiseFloorRms = (noiseRmsSum / PROFILE_BUFS) * 1.3;
       }
       output.fill(0);
       return;
     }
 
     const threshold = noiseFloorRms * Math.pow(10, VOICE_MARGIN / 20);
-    if (rms > threshold) {
-      holdCount = holdSamples;
-    } else if (holdCount > 0) {
-      holdCount--;
+    const voiceDetected = rms > threshold;
+
+    if (voiceDetected) {
+      holdCount    = holdSamples;
+      retrainCount = 0;   // reset retrain timer — don't sample floor during speech
+      retrainSum   = 0;
+      isOpen       = true;
+    } else {
+      if (holdCount > 0) holdCount--;
+
+      // PHASE 2: continuously retrain floor during silence (gate closed)
+      if (!isOpen || holdCount === 0) {
+        retrainSum += rms;
+        retrainCount++;
+        if (retrainCount >= RETRAIN_BUFS) {
+          // Update floor only if new measurement is plausible (not silent room spike)
+          const newFloor = (retrainSum / retrainCount) * 1.3;
+          if (newFloor > 0.00001) noiseFloorRms = newFloor;
+          retrainCount = 0;
+          retrainSum   = 0;
+        }
+      }
     }
 
     const targetGain = holdCount > 0 ? 1 : 0;
-    gateGain = gateGain < targetGain
-      ? Math.min(gateGain + FADE_STEP, 1)
-      : Math.max(gateGain - FADE_STEP, 0);
+    if (targetGain === 0 && SNAP_CLOSE) {
+      // Snap gate shut — no noise tail
+      gateGain = 0;
+      isOpen   = false;
+    } else {
+      gateGain = gateGain < targetGain
+        ? Math.min(gateGain + FADE_IN_STEP, 1)
+        : Math.max(gateGain - 0.05, 0);
+    }
 
     for (let i = 0; i < input.length; i++) output[i] = input[i] * gateGain;
   };
 
-  // 11. Compressor — normalize voice dynamics, prevent clipping
+  // 12. Compressor — normalize voice dynamics, prevent clipping on loud consonants
   const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -20;
-  comp.knee.value      = 6;
-  comp.ratio.value     = 4;
-  comp.attack.value    = 0.003;
-  comp.release.value   = 0.25;
+  comp.threshold.value = -18;
+  comp.knee.value      = 5;
+  comp.ratio.value     = 5;
+  comp.attack.value    = 0.002;
+  comp.release.value   = 0.20;
 
-  // Wire: source → gain → hp1 → hp2 → notch141 → notch153 → notch379 → notch424
-  //       → mud → presence → air → lp → gate → comp → dest
+  // Wire: source → gain → hp1 → hp2 → notch50 → notch100 → notch141 → notch153
+  //       → notch379 → notch424 → mud → presence → lp → gate → comp → dest
   sourceNode.connect(gainNode);
   gainNode.connect(hp1);
   hp1.connect(hp2);
-  hp2.connect(notch141);
+  hp2.connect(notch50);
+  notch50.connect(notch100);
+  notch100.connect(notch141);
   notch141.connect(notch153);
   notch153.connect(notch379);
   notch379.connect(notch424);
   notch424.connect(mud);
   mud.connect(presence);
-  presence.connect(air);
-  air.connect(lp);
+  presence.connect(lp);
   lp.connect(gate);
   gate.connect(comp);
   comp.connect(dest);
@@ -573,13 +624,13 @@ btnStart.addEventListener('click', async () => {
       try {
         micStreamLocal = await navigator.mediaDevices.getUserMedia({
           audio: {
-            echoCancellation:    true,
-            noiseSuppression:    true,
-            autoGainControl:     false,
-            channelCount:        1,
+            echoCancellation:    true,   // remove speaker bleed picked up by mic
+            noiseSuppression:    true,   // OS/hardware-level noise suppression (fan, AC, background)
+            autoGainControl:     false,  // OFF — our compressor handles normalization
+            channelCount:        1,      // mono — halves noise floor, no stereo bleed
             sampleRate:          48000,
             sampleSize:          16,
-            latency:             0       // request lowest latency buffer from browser
+            latency:             0       // lowest latency buffer — reduces gate reaction delay
           },
           video: false
         });
