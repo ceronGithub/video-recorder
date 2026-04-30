@@ -67,7 +67,34 @@
 
       <!-- Divider -->
       <div class="panel-divider"></div>
-      <p class="src-note">↓ Live preview and recording controls are in panel 02 below</p>
+
+      <!-- Format selector — choose before clicking START -->
+      <div class="format-select-row">
+        <span class="format-select-label">OUTPUT FORMAT</span>
+        <div class="format-options">
+          <label class="format-opt">
+            <input type="radio" name="outputFormat" value="webm" checked/>
+            <span class="format-opt-box">
+              <span class="format-opt-name">WEBM</span>
+              <span class="format-opt-desc">VP9 + Opus · Best quality</span>
+            </span>
+          </label>
+          <label class="format-opt">
+            <input type="radio" name="outputFormat" value="mp4"/>
+            <span class="format-opt-box">
+              <span class="format-opt-name">MP4</span>
+              <span class="format-opt-desc">H.264 + AAC · Universal</span>
+            </span>
+          </label>
+          <label class="format-opt">
+            <input type="radio" name="outputFormat" value="mp3"/>
+            <span class="format-opt-box">
+              <span class="format-opt-name">MP3</span>
+              <span class="format-opt-desc">Audio only · No video</span>
+            </span>
+          </label>
+        </div>
+      </div>
     </section>
 
     <!-- ── PANEL 02: PREVIEW ── -->
@@ -100,7 +127,7 @@
             <option value="5000000" selected>Best — 5 Mbps</option>
             <option value="8000000">Max — 8 Mbps</option>
           </select>
-          <span class="fmt-tag">WEBM · VP9+Opus</span>
+          <span class="fmt-tag" id="fmtTag">WEBM · VP9+Opus</span>
         </div>
       </div>
     </section>

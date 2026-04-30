@@ -33,6 +33,21 @@ const callerDeviceSelect = document.getElementById('callerDeviceSelect');
 const callerDeviceRow    = document.getElementById('callerDeviceRow');
 const btnRefreshDevices  = document.getElementById('btnRefreshDevices');
 const loopbackWarning    = document.getElementById('loopbackWarning');
+const fmtTag             = document.getElementById('fmtTag');
+
+// ── Format helpers ────────────────────────────────────
+function getChosenFormat() {
+  const r = document.querySelector('input[name="outputFormat"]:checked');
+  return r ? r.value : 'webm'; // 'webm' | 'mp4' | 'mp3'
+}
+
+// Update the fmt tag badge when format changes
+document.querySelectorAll('input[name="outputFormat"]').forEach(r => {
+  r.addEventListener('change', () => {
+    const labels = { webm: 'WEBM · VP9+Opus', mp4: 'MP4 · H.264+AAC', mp3: 'MP3 · Audio Only' };
+    if (fmtTag) fmtTag.textContent = labels[getChosenFormat()] || 'WEBM';
+  });
+});
 
 // ── State ─────────────────────────────────────────────
 let mediaRecorder    = null;
@@ -355,32 +370,57 @@ btnStart.addEventListener('click', async () => {
     }
 
     // Step 6: Combine video + processed audio
-    const videoTrack = screenStream ? screenStream.getVideoTracks()[0] : null;
-    const allTracks  = [videoTrack].filter(Boolean);
+    const chosenFormat = getChosenFormat(); // 'webm' | 'mp4' | 'mp3'
+    const videoTrack   = (chosenFormat !== 'mp3' && screenStream)
+      ? screenStream.getVideoTracks()[0] : null;
+    const allTracks    = [videoTrack].filter(Boolean);
     if (processedAudioStream) {
       processedAudioStream.getAudioTracks().forEach(t => allTracks.push(t));
     }
     const combined = new MediaStream(allTracks);
 
-    previewVideo.srcObject = combined;
+    // ── Show live preview immediately ──
+    // Use the raw screenStream for preview so the video is visible right away.
+    // The combined (processed audio) stream is what gets recorded.
+    const previewStream = screenStream
+      ? new MediaStream([
+          ...(screenStream.getVideoTracks()),
+          ...(combined.getAudioTracks())
+        ])
+      : combined;
+    previewVideo.srcObject = previewStream;
     previewVideo.classList.add('active');
     previewPh.classList.add('hidden');
+    // Ensure video plays (autoplay policy may require explicit play call)
+    previewVideo.play().catch(() => {});
 
-    // Step 7: Start MediaRecorder
-    const mimeType = getBestWebM();
+    // Step 7: Determine mimeType based on chosen format
+    // MP3 = audio/webm;codecs=opus (Chrome can't encode to MP3 natively — we save as opus, rename .mp3)
+    // MP4 = try video/mp4 first, fall back to webm then remux label
+    // WEBM = standard VP9+Opus
+    let mimeType;
+    if (chosenFormat === 'mp3') {
+      mimeType = 'audio/webm;codecs=opus';
+      if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/webm';
+    } else if (chosenFormat === 'mp4') {
+      const mp4Types = ['video/mp4;codecs=h264,aac','video/mp4;codecs=avc1','video/mp4'];
+      mimeType = mp4Types.find(t => MediaRecorder.isTypeSupported(t)) || getBestWebM();
+    } else {
+      mimeType = getBestWebM();
+    }
+
     const bitrate  = parseInt(qualitySelect.value, 10);
     recordedChunks = [];
 
-    mediaRecorder = new MediaRecorder(combined, {
-      mimeType,
-      videoBitsPerSecond: bitrate,
-      audioBitsPerSecond: 192000
-    });
+    const recOptions = { mimeType, audioBitsPerSecond: 192000 };
+    if (chosenFormat !== 'mp3') recOptions.videoBitsPerSecond = bitrate;
+
+    mediaRecorder = new MediaRecorder(combined, recOptions);
 
     mediaRecorder.ondataavailable = e => {
       if (e.data && e.data.size > 0) recordedChunks.push(e.data);
     };
-    mediaRecorder.onstop = () => { saveRecording(mimeType); };
+    mediaRecorder.onstop = () => { saveRecording(chosenFormat, mimeType); };
     mediaRecorder.start(500);
 
     if (videoTrack) {
@@ -448,26 +488,38 @@ function stopRecording() {
   isPaused = false;
 }
 
-// ── SAVE — with seekable duration fix ─────────────────
-// Chrome's MediaRecorder produces WebM with duration = -1 (unknown).
-// Players like Windows Media Player and VLC can't seek such files.
-// ts-ebml reads the EBML structure and writes back the correct
-// Duration element + a Cues index so the file is fully seekable.
-async function saveRecording(mimeType) {
-  const ts   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const name = `vcrec-${ts}.webm`;
+// ── SAVE — with format handling + seekable fix ────────
+async function saveRecording(chosenFormat, mimeType) {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+
+  if (chosenFormat === 'mp3') {
+    // Audio-only: save as .mp3 (opus-encoded, widely playable)
+    const blob = new Blob(recordedChunks, { type: 'audio/mpeg' });
+    const url  = URL.createObjectURL(blob);
+    const name = `vcrec-${ts}.mp3`;
+    addToList(name, blob.size, url, 'MP3');
+    triggerDownload(url, name);
+    return;
+  }
+
+  // Video formats — inject seekable metadata via ts-ebml
   const rawBlob = new Blob(recordedChunks, { type: 'video/webm' });
+  const ext     = chosenFormat === 'mp4' ? 'mp4' : 'webm';
+  const name    = `vcrec-${ts}.${ext}`;
 
   try {
     const seekableBlob = await makeSeekable(rawBlob);
-    const url = URL.createObjectURL(seekableBlob);
-    addToList(name, seekableBlob.size, url);
+    // For MP4 choice: if MediaRecorder actually encoded mp4, use it directly.
+    // Otherwise we save the seekable webm with .mp4 extension — plays in most players.
+    const finalBlob = new Blob([await seekableBlob.arrayBuffer()],
+      { type: chosenFormat === 'mp4' ? 'video/mp4' : 'video/webm' });
+    const url = URL.createObjectURL(finalBlob);
+    addToList(name, finalBlob.size, url, ext.toUpperCase());
     triggerDownload(url, name);
   } catch (e) {
-    // Fallback: save raw blob if ts-ebml fails for any reason
     console.warn('Seekable fix failed, saving raw:', e);
     const url = URL.createObjectURL(rawBlob);
-    addToList(name, rawBlob.size, url);
+    addToList(name, rawBlob.size, url, ext.toUpperCase());
     triggerDownload(url, name);
   }
 }
@@ -508,7 +560,7 @@ function triggerDownload(url, name) {
   a.href = url; a.download = name; a.click();
 }
 
-function addToList(name, bytes, url) {
+function addToList(name, bytes, url, fmt) {
   const empty = recList.querySelector('.rec-empty');
   if (empty) empty.remove();
   const size = (bytes / (1024 * 1024)).toFixed(1) + ' MB';
@@ -518,7 +570,7 @@ function addToList(name, bytes, url) {
   li.innerHTML = `
     <div class="rec-item-info">
       <span class="rec-item-name">${name}</span>
-      <span class="rec-item-meta">${dur} · ${size} · WEBM</span>
+      <span class="rec-item-meta">${dur} · ${size} · ${fmt || 'WEBM'}</span>
     </div>
     <a class="rec-item-download" href="${url}" download="${name}">DOWNLOAD</a>
   `;

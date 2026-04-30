@@ -159,6 +159,33 @@ html, body {
 }
 .loopback-warning strong { color: #ffcc77; }
 
+/* ===== FORMAT SELECTOR (panel 01) ===== */
+.format-select-row { display: flex; flex-direction: column; gap: 10px; }
+.format-select-label {
+  font-size: 9px; letter-spacing: 3px; color: var(--muted);
+  font-family: var(--font-display); font-weight: 600;
+}
+.format-options { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
+.format-opt { cursor: pointer; }
+.format-opt input { display: none; }
+.format-opt-box {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 10px; border: 1px solid var(--border);
+  border-radius: 3px; transition: all .2s;
+  background: transparent;
+}
+.format-opt:hover .format-opt-box { border-color: #444; }
+.format-opt input:checked + .format-opt-box {
+  border-color: var(--accent);
+  background: rgba(232,255,71,.05);
+}
+.format-opt-name {
+  font-family: var(--font-display); font-size: 13px; font-weight: 800;
+  letter-spacing: 2px; color: var(--muted);
+}
+.format-opt input:checked + .format-opt-box .format-opt-name { color: var(--accent); }
+.format-opt-desc { font-size: 9px; letter-spacing: .5px; color: #444; line-height: 1.4; }
+
 /* ===== CONTROLS + PREVIEW PANEL ===== */
 .ctrl-btn {
   font-family: var(--font-display);
