@@ -164,65 +164,66 @@ function startTimer() {
 function stopTimer() { clearInterval(timerInterval); timerInterval = null; }
 
 // ── Audio pipeline ────────────────────────────────────
-// Each track (MIC + CALLER) goes through the same voice enhancement chain:
+// MIC chain:    Source → Gain → HighPass(80Hz) → LowShelf(-6dB@200Hz)
+//                      → Peaking(+4dB@3kHz) → HighShelf(+3dB@6kHz) → Compressor → Dest
 //
-//   Source → HighPass(80Hz) → LowShelf(-6dB@200Hz) → Peaking(+4dB@3kHz)
-//          → HighShelf(+3dB@6kHz) → Compressor → Gain → Destination
+// CALLER chain: Source → Gain → HighPass(80Hz) → Peaking(+4dB@3kHz)
+//                      → HighShelf(+3dB@6kHz) → Compressor → Dest
 //
-//  HighPass 80Hz      : removes low-end rumble, keyboard thumps, AC hum
-//  LowShelf -6dB 200Hz: cuts muddiness / boominess from voice
-//  Peaking +4dB 3kHz  : boosts voice presence and intelligibility
-//  HighShelf +3dB 6kHz: adds clarity and air to the voice
-//  DynamicsCompressor : evens out loudness, prevents clipping at high gain
-//  Gain               : user volume slider (0–400%)
+// KEY FIX: Gain is now FIRST — user volume boost happens before the compressor.
+//          Previously gain was after compressor, so 400% was boosting an already-
+//          squashed signal. Now 400% raises the input into the compressor, giving
+//          true loudness increase.
 //
-// getUserMedia mic constraints (echoCancellation, noiseSuppression, autoGainControl)
-// handle hardware-level noise cancellation BEFORE the signal even reaches WebAudio.
-// This chain is the software-level enhancement layer on top.
-function buildVoiceChain(ctx, sourceNode, gainNode, dest) {
-  // 1. High-pass: cut everything below 80Hz (rumble, thumps)
+// CALLER skips the LowShelf(-6dB) mud cut — loopback/tab audio is already
+// processed by the call app and doesn't have the low-end boominess a raw mic has.
+// Removing the -6dB cut recovers significant perceived volume on the caller side.
+function buildVoiceChain(ctx, sourceNode, gainNode, dest, isCaller) {
+  // 1. Gain first — user volume control before any processing
+  gainNode.connect; // already created outside, wired below
+
+  // 2. High-pass: cut rumble below 80Hz
   const hp = ctx.createBiquadFilter();
   hp.type            = 'highpass';
   hp.frequency.value = 80;
   hp.Q.value         = 0.7;
 
-  // 2. Low-shelf: reduce muddiness around 200Hz
+  // 3. Low-shelf mud cut — MIC only (caller audio is already processed by call app)
   const mud = ctx.createBiquadFilter();
   mud.type            = 'lowshelf';
   mud.frequency.value = 200;
-  mud.gain.value      = -6;
+  mud.gain.value      = isCaller ? 0 : -6;  // skip cut for caller
 
-  // 3. Peaking: boost voice presence at 3kHz (speech intelligibility sweet spot)
+  // 4. Peaking: boost presence at 3kHz
   const presence = ctx.createBiquadFilter();
   presence.type            = 'peaking';
   presence.frequency.value = 3000;
   presence.Q.value         = 1.0;
   presence.gain.value      = 4;
 
-  // 4. High-shelf: add air/crispness above 6kHz
+  // 5. High-shelf: add air above 6kHz
   const air = ctx.createBiquadFilter();
   air.type            = 'highshelf';
   air.frequency.value = 6000;
   air.gain.value      = 3;
 
-  // 5. Dynamics compressor: normalize loudness, prevent distortion
+  // 6. Compressor last — limits peaks AFTER gain boost, prevents clipping
   const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -24;
-  comp.knee.value      = 6;
-  comp.ratio.value     = 4;
-  comp.attack.value    = 0.003;
-  comp.release.value   = 0.25;
+  comp.threshold.value = -18;  // raised from -24 so quieter signals aren't squashed
+  comp.knee.value      = 8;
+  comp.ratio.value     = 3;    // gentler ratio so boost is more audible
+  comp.attack.value    = 0.005;
+  comp.release.value   = 0.3;
 
-  // Wire chain: source → hp → mud → presence → air → comp → gain → dest
-  sourceNode.connect(hp);
+  // Wire: source → gain → hp → mud → presence → air → comp → dest
+  sourceNode.connect(gainNode);
+  gainNode.connect(hp);
   hp.connect(mud);
   mud.connect(presence);
   presence.connect(air);
   air.connect(comp);
-  comp.connect(gainNode);
-  gainNode.connect(dest);
+  comp.connect(dest);
 
-  // Return compressor node so analyser can tap post-comp signal
   return comp;
 }
 
@@ -240,14 +241,22 @@ function buildAudioPipeline(micStreamIn, callerStreamIn) {
 
   if (micStreamIn && micStreamIn.getAudioTracks().length > 0) {
     const src  = audioCtx.createMediaStreamSource(micStreamIn);
-    const comp = buildVoiceChain(audioCtx, src, micGain, dest);
-    comp.connect(micAnalyser);  // tap analyser after compressor
+    const comp = buildVoiceChain(audioCtx, src, micGain, dest, false);
+    comp.connect(micAnalyser);
   }
 
   if (callerStreamIn && callerStreamIn.getAudioTracks().length > 0) {
-    const src  = audioCtx.createMediaStreamSource(callerStreamIn);
-    const comp = buildVoiceChain(audioCtx, src, callerGain, dest);
-    comp.connect(sysAnalyser);  // tap analyser after compressor
+    const src = audioCtx.createMediaStreamSource(callerStreamIn);
+    // Pre-boost: caller audio enters at a lower level than mic (no hardware AGC).
+    // +8dB fixed boost before the voice chain to match baseline levels.
+    // This is separate from callerGain (the user slider) — it's a fixed offset.
+    const preBoost = audioCtx.createGain();
+    preBoost.gain.value = 2.5; // ~+8dB baseline
+    src.connect(preBoost);
+    // buildVoiceChain expects a real AudioNode as source — pass preBoost as the source
+    // by temporarily wrapping: source → preBoost → gainNode → EQ → comp → dest
+    const comp = buildVoiceChain(audioCtx, preBoost, callerGain, dest, true);
+    comp.connect(sysAnalyser);
   }
 
   // VU meter animation
@@ -327,9 +336,10 @@ btnStart.addEventListener('click', async () => {
           audio: {
             echoCancellation:    true,
             noiseSuppression:    true,
-            autoGainControl:     true,
-            channelCount:        1,     // mono for voice — cleaner than stereo
-            sampleRate:          48000, // Opus optimal sample rate
+            autoGainControl:     false, // OFF — hardware AGC inflates mic before WebAudio;
+                                        // the volume slider handles gain uniformly for both tracks
+            channelCount:        1,
+            sampleRate:          48000,
             sampleSize:          16
           },
           video: false
