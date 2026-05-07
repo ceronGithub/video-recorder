@@ -1,0 +1,179 @@
+================================================================================
+  OVERVIEW PROJECT — VCREC (Video Call Recorder)
+  Repository : https://github.com/ceronGithub/video-recorder.git
+  Branch     : master
+  Last Updated: Initial generation
+================================================================================
+
+── 1. PROJECT PURPOSE ──────────────────────────────────────────────────────────
+VCREC is a browser-based video/audio call recorder that runs entirely client-side
+with no server, no installation, and no backend. It captures screen, window, tab,
+camera, or audio-only streams directly in the browser using the MediaRecorder API.
+It supports dual-audio recording (user mic + caller audio via VB-Cable loopback),
+applies a real-time multi-stage audio processing pipeline (noise cancellation,
+EQ, adaptive spectral gate, compression), and saves recordings as WEBM, MP4, or
+MP3. MP4 files are remuxed using ffmpeg.wasm for full seekability.
+
+── 2. TECH STACK ────────────────────────────────────────────────────────────────
+- Vanilla HTML5 / CSS3 / JavaScript (ES6+, no framework, no build step)
+- MediaRecorder API       — records combined MediaStream to chunks
+- Web Audio API           — full audio pipeline (filters, gain, gate, compressor)
+- getDisplayMedia API     — screen/window/tab capture
+- getUserMedia API        — mic and loopback device capture
+- ts-ebml (CDN)           — patches Duration + Cues into raw WebM for seekability
+- ffmpeg.wasm (CDN)       — remuxes WebM → true MP4 with moov atom (seekable MP4)
+- Google Fonts            — Space Mono + Syne
+
+── 3. DATABASE / STORAGE ───────────────────────────────────────────────────────
+None. This is a fully client-side app. No database, no backend, no server.
+All recordings are stored as Blob URLs in the browser tab's memory and
+automatically downloaded to the user's local device on STOP.
+
+── 4. FILE MAP ─────────────────────────────────────────────────────────────────
+index.html              → Full UI. All panels, buttons, controls, toggles.
+                          Loads all JS and CSS. Entry point of the app.
+css/style.css           → All visual styles. Dark theme. Panel layout. Animations.
+js/dom.js               → Central DOM registry. All querySelector calls live here.
+                          All other modules reference elements from this file.
+js/devices.js           → Device enumeration, source mode selection,
+                          loopback device dropdown, loopback warning logic.
+js/audio.js             → Full Web Audio pipeline. Mic chain + Caller chain.
+                          VU meter animation. Adaptive spectral noise gate.
+                          buildAudioPipeline() + teardownAudio() exported.
+js/save.js              → Recording save logic. WEBM seekable patch (ts-ebml),
+                          MP4 remux (ffmpeg.wasm), MP3 save, download trigger,
+                          and recordings list UI entry creation.
+js/sources.js           → Isolated capture functions per mode.
+                          Each mode is fully self-contained. Returns streams.
+                          captureForMode(mode) is the public dispatcher.
+js/recorder.js          → Main orchestrator. Wires START / PAUSE / STOP buttons.
+                          Calls captureForMode() → buildAudioPipeline()
+                          → MediaRecorder. Manages state and timer.
+
+── 5. SOURCE MODES ─────────────────────────────────────────────────────────────
+Each mode is an isolated async function in sources.js:
+
+  MODE          FUNCTION                  VIDEO SOURCE         CALLER AUDIO
+  ──────────────────────────────────────────────────────────────────────────
+  screen        captureEntireScreen()     Full monitor         Loopback > Tab audio
+  window        captureApplicationWindow() App window          Loopback > Tab audio
+  screentabmic  captureScreenTabMic()     Browser tab         Tab audio (required)
+  camera        captureCameraAndMic()     Webcam              None
+  interview     captureInterviewCall()    None (audio only)   Loopback (required)
+
+── 6. PROCESS FLOW — RECORDING (HAPPY PATH) ────────────────────────────────────
+Step 1 : User opens index.html in Chrome/Edge/Firefox.
+Step 2 : dom.js runs — all DOM elements are cached into named constants.
+Step 3 : devices.js initDevices() runs — requests mic permission to get device
+         labels, populates callerDeviceSelect dropdown, wires mode buttons.
+Step 4 : User selects a source mode (default: Entire Screen).
+Step 5 : User optionally selects a Caller Audio Device (VB-Cable or Stereo Mix).
+Step 6 : User optionally adjusts Mic/Caller volume sliders and Amp multipliers.
+Step 7 : User selects output format (WEBM / MP4 / MP3) and quality bitrate.
+Step 8 : User clicks ▶ START.
+Step 9 : recorder.js btnStart handler fires.
+Step 10: captureForMode(mode) in sources.js is called.
+         → getDisplayMedia() or getUserMedia() opens browser permission dialog.
+         → User grants screen share / camera access.
+         → Returns { screenStream, micStream, loopbackStream, callerAudioStream }.
+Step 11: buildAudioPipeline(micStream, callerAudioStream) in audio.js is called.
+         → Creates AudioContext.
+         → Builds MicChain: HP×2 → 6 notch filters → mud cut → presence boost
+           → LP ceiling → adaptive spectral gate → compressor.
+         → Builds CallerChain: preBoost → HP×2 → 6 notch filters → mud cut
+           → presence boost → LP ceiling → compressor (no gate for caller).
+         → Starts VU meter animation loop via requestAnimationFrame.
+         → Returns processed MediaStream (dest.stream).
+Step 12: Video track from screenStream + processed audio tracks are combined
+         into a single MediaStream.
+Step 13: previewVideo.srcObject = combined stream → live preview shown in Panel 02.
+Step 14: MediaRecorder starts with chosen mimeType + bitrate. Chunks collected
+         every 500ms in recordedChunks array.
+Step 15: Timer starts. REC badge and timer overlay become visible.
+         Status bar shows "RECORDING · [mode label]".
+Step 16: User optionally clicks ⏸ PAUSE → MediaRecorder.pause(). Timer pauses.
+         User clicks RESUME → MediaRecorder.resume(). Timer resumes.
+Step 17: User clicks ⏹ STOP & SAVE (or ends screen share via browser UI).
+Step 18: stopRecording() fires:
+         → MediaRecorder.stop() → triggers onstop callback.
+         → All stream tracks are stopped and nulled.
+         → teardownAudio() closes AudioContext, cancels animation frame, nulls refs.
+         → Preview is cleared. Timer stops. UI resets to idle.
+Step 19: mediaRecorder.onstop → saveRecording(format, mimeType, chunks, elapsed).
+         WEBM: ts-ebml patches Duration + Cues → seekable WEBM blob → download.
+         MP4 : ffmpeg.wasm remuxes WebM → MP4 with movflags faststart → download.
+               Fallback 1: ts-ebml seekable patch saved as .mp4.
+               Fallback 2: raw WebM saved as .mp4 if all else fails.
+         MP3 : raw opus blob saved directly as .mp3 → download.
+Step 20: addToList() prepends recording entry to Panel 04 with name, duration,
+         size, format, and a DOWNLOAD button.
+
+── 7. PROCESS FLOW — AUDIO PIPELINE DETAIL ─────────────────────────────────────
+MIC CHAIN (buildMicChain):
+  source → micGain → HP(200Hz)×2 → notch(50Hz) → notch(100Hz) → notch(141Hz)
+  → notch(153Hz) → notch(379Hz) → notch(424Hz) → mudCut(-12dB@180Hz)
+  → presence(+5dB@2.5kHz) → LP(7500Hz) → adaptiveSpectralGate → compressor → dest
+
+  Gate logic: Profiles noise floor for first 1.5s of silence. Opens only when
+  RMS is 18dB above floor. Snap-closes instantly on silence. Re-trains floor
+  every 3s during closed state. Prevents all noise during pauses in speech.
+
+CALLER CHAIN (buildCallerChain):
+  source → preBoost(4.0×) → callerGain → HP(130Hz)×2 → notch(50Hz) → notch(100Hz)
+  → notch(141Hz) → notch(153Hz) → notch(379Hz) → notch(424Hz) → mudCut(-12dB@180Hz)
+  → presence(+5dB@2.5kHz) → LP(7500Hz) → compressor → dest
+  NOTE: No gate — gate was silencing caller audio (arrives as continuous stream).
+
+── 8. COMMON DEBUG POINTS ──────────────────────────────────────────────────────
+ISSUE                              WHERE TO LOOK
+──────────────────────────────────────────────────────────────────────────────
+Caller audio not recorded          → Check callerDeviceSelect value in devices.js
+                                     Confirm VB-Cable is set as Windows default
+                                     playback. Check safeLoopback() in sources.js.
+
+Mic audio silent in recording      → Check includeMic checkbox state.
+                                     Check safeMic() in sources.js for errors.
+                                     Check micGain value in audio.js.
+
+Gate silencing all mic audio       → buildMicChain() in audio.js, gate section.
+                                     PROFILE_BUFS / VOICE_MARGIN values.
+                                     Try increasing VOICE_MARGIN from 18 to 22.
+
+MP4 not seekable                   → save.js remuxToMp4(). Check ffmpeg.wasm CDN
+                                     load. Check browser console for wasm errors.
+                                     Fallback chain: ffmpeg → ebml patch → raw blob.
+
+WEBM not seekable                  → save.js makeSeekable(). Check ts-ebml CDN load.
+                                     Raw blob is final fallback if ebml fails.
+
+Preview video blank                → recorder.js Step 12-13. Check screenStream
+                                     video tracks. Check previewVideo.srcObject.
+
+Recording stops immediately        → videoTrack.onended in recorder.js. User may
+                                     have ended share via browser UI prematurely.
+
+VU meters not moving               → audio.js draw() animation. Check animFrame.
+                                     Confirm AudioContext is not suspended.
+                                     Check analyser nodes are connected correctly.
+
+Mode button not changing behavior  → devices.js initDevices() src-btn listeners.
+                                     Check activeMode variable. Check dataset.mode
+                                     attribute on the button in index.html.
+
+Device dropdown empty / no labels  → devices.js populateDevices(). Mic permission
+                                     may have been denied. Check browser settings.
+
+── 9. ENVIRONMENT VARIABLES ────────────────────────────────────────────────────
+None. This is a fully client-side, serverless application.
+No .env file required. No API keys. No backend configuration.
+
+── 10. EXTERNAL CDN DEPENDENCIES ───────────────────────────────────────────────
+ts-ebml@2.0.2     : https://cdn.jsdelivr.net/npm/ts-ebml@2.0.2/lib/index.js
+@ffmpeg/ffmpeg     : https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/umd/ffmpeg.js
+@ffmpeg/util       : https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js
+@ffmpeg/core(wasm) : https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ (loaded at runtime)
+Google Fonts       : Space Mono (400,700) + Syne (400,600,800)
+
+NOTE: If CDN is unreachable, WEBM save will fallback to raw (non-seekable) blob.
+      MP4 save will attempt ebml patch, then fallback to raw .mp4 blob.
+================================================================================
