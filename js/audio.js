@@ -173,16 +173,20 @@ function buildMicChain(ctx, sourceNode, gainNode, dest) {
 }
 
 /* ── buildCallerChain ───────────────────────────────────────────────────────
- * Complete noise cancellation for caller / app audio (VB-Cable, tab audio).
+ * Audio processing for caller / loopback audio (VB-Cable, tab audio).
  * Mirrors buildMicChain with caller-specific adjustments:
- *   A) HP at 130 Hz (not 200 Hz) — caller voice/music can start at ~130 Hz
- *   B) HOLD_SEC = 0.4s — longer hold prevents cutting caller audio on natural pauses
- *   C) VOICE_MARGIN = 15 dB — slightly looser to preserve quiet caller speech
+ *   A) HP at 130 Hz (not 200 Hz) — caller voice/music starts lower than mic
+ *   B) NO noise gate — caller audio from VB-Cable arrives as a continuous stream.
+ *      A gate profiles "silence" and then gates out the actual caller speech because
+ *      it can't distinguish caller voice from noise floor at that level.
+ *      The compressor handles dynamics instead.
+ *   C) preBoost = 4.0 — loopback audio typically arrives 12-18dB quieter than mic
+ *   D) Analyser tapped BEFORE compressor so VU meter shows real signal regardless of gain
  */
 function buildCallerChain(ctx, sourceNode, gainNode, dest) {
-  // 1. Pre-boost — loopback audio typically arrives lower than mic (~+8 dB baseline)
+  // 1. Pre-boost — loopback audio arrives significantly lower than mic
   const preBoost = ctx.createGain();
-  preBoost.gain.value = 2.5;
+  preBoost.gain.value = 4.0;
 
   // 2. Dual high-pass at 130 Hz (Q=1.4) — preserves caller voice/music content
   const hp1 = ctx.createBiquadFilter();
@@ -191,22 +195,27 @@ function buildCallerChain(ctx, sourceNode, gainNode, dest) {
   const hp2 = ctx.createBiquadFilter();
   hp2.type = 'highpass'; hp2.frequency.value = 130; hp2.Q.value = 1.4;
 
-  // 3-8. Same notch filters as mic chain
+  // 3. Notch at 50 Hz — mains hum fundamental
   const notch50 = ctx.createBiquadFilter();
   notch50.type = 'notch'; notch50.frequency.value = 50; notch50.Q.value = 12;
 
+  // 4. Notch at 100 Hz — 2nd harmonic
   const notch100 = ctx.createBiquadFilter();
   notch100.type = 'notch'; notch100.frequency.value = 100; notch100.Q.value = 10;
 
+  // 5. Notch at 141 Hz — fan motor fundamental
   const notch141 = ctx.createBiquadFilter();
   notch141.type = 'notch'; notch141.frequency.value = 141; notch141.Q.value = 6;
 
+  // 6. Notch at 153 Hz — fan harmonic
   const notch153 = ctx.createBiquadFilter();
   notch153.type = 'notch'; notch153.frequency.value = 153; notch153.Q.value = 6;
 
+  // 7. Notch at 379 Hz — laptop body resonance
   const notch379 = ctx.createBiquadFilter();
   notch379.type = 'notch'; notch379.frequency.value = 379; notch379.Q.value = 5;
 
+  // 8. Notch at 424 Hz — resonance harmonic
   const notch424 = ctx.createBiquadFilter();
   notch424.type = 'notch'; notch424.frequency.value = 424; notch424.Q.value = 5;
 
@@ -214,7 +223,7 @@ function buildCallerChain(ctx, sourceNode, gainNode, dest) {
   const mud = ctx.createBiquadFilter();
   mud.type = 'lowshelf'; mud.frequency.value = 180; mud.gain.value = -12;
 
-  // 10. Presence boost at 2.5 kHz
+  // 10. Presence boost at 2.5 kHz — voice intelligibility
   const presence = ctx.createBiquadFilter();
   presence.type = 'peaking'; presence.frequency.value = 2500;
   presence.Q.value = 1.2; presence.gain.value = 5;
@@ -223,90 +232,20 @@ function buildCallerChain(ctx, sourceNode, gainNode, dest) {
   const lp = ctx.createBiquadFilter();
   lp.type = 'lowpass'; lp.frequency.value = 7500; lp.Q.value = 0.8;
 
-  // 12. Adaptive spectral noise gate — VOICE_MARGIN=15dB, HOLD_SEC=0.4s
-  const bufSize      = 1024;
-  const gate         = ctx.createScriptProcessor(bufSize, 1, 1);
-  const sampleRate   = ctx.sampleRate || 48000;
-  const PROFILE_BUFS = Math.ceil(1.5 * sampleRate / bufSize);
-  const RETRAIN_BUFS = Math.ceil(3.0 * sampleRate / bufSize);
-  const VOICE_MARGIN = 15;
-  const HOLD_SEC     = 0.4;
-  const FADE_IN_STEP = 0.15;
-  const SNAP_CLOSE   = true;
-
-  let profileCount  = 0;
-  let noiseRmsSum   = 0;
-  let noiseFloorRms = 0.001;
-  let retrainCount  = 0;
-  let retrainSum    = 0;
-  let holdCount     = 0;
-  let holdSamples   = Math.round(HOLD_SEC * sampleRate / bufSize);
-  let gateGain      = 0;
-  let isOpen        = false;
-
-  gate.onaudioprocess = e => {
-    const input  = e.inputBuffer.getChannelData(0);
-    const output = e.outputBuffer.getChannelData(0);
-    let sum = 0;
-    for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
-    const rms = Math.sqrt(sum / input.length);
-
-    if (profileCount < PROFILE_BUFS) {
-      noiseRmsSum += rms;
-      profileCount++;
-      if (profileCount === PROFILE_BUFS) noiseFloorRms = (noiseRmsSum / PROFILE_BUFS) * 1.3;
-      output.fill(0);
-      return;
-    }
-
-    const threshold     = noiseFloorRms * Math.pow(10, VOICE_MARGIN / 20);
-    const voiceDetected = rms > threshold;
-
-    if (voiceDetected) {
-      holdCount = holdSamples;
-      retrainCount = 0;
-      retrainSum   = 0;
-      isOpen       = true;
-    } else {
-      if (holdCount > 0) holdCount--;
-      if (!isOpen || holdCount === 0) {
-        retrainSum += rms;
-        retrainCount++;
-        if (retrainCount >= RETRAIN_BUFS) {
-          const newFloor = (retrainSum / retrainCount) * 1.3;
-          if (newFloor > 0.00001) noiseFloorRms = newFloor;
-          retrainCount = 0;
-          retrainSum   = 0;
-        }
-      }
-    }
-
-    const targetGain = holdCount > 0 ? 1 : 0;
-    if (targetGain === 0 && SNAP_CLOSE) {
-      gateGain = 0;
-      isOpen   = false;
-    } else {
-      gateGain = gateGain < targetGain
-        ? Math.min(gateGain + FADE_IN_STEP, 1)
-        : Math.max(gateGain - 0.05, 0);
-    }
-
-    for (let i = 0; i < input.length; i++) output[i] = input[i] * gateGain;
-  };
-
-  // 13. Compressor — normalize caller dynamics
+  // 12. Compressor — normalize caller dynamics without gating
   const comp = ctx.createDynamicsCompressor();
   comp.threshold.value = -18; comp.knee.value = 5;
-  comp.ratio.value = 5; comp.attack.value = 0.002; comp.release.value = 0.20;
+  comp.ratio.value = 5; comp.attack.value = 0.002; comp.release.value = 0.25;
 
   // Wire: source → preBoost → gain → hp1 → hp2 → notch50 → notch100 → notch141
-  //       → notch153 → notch379 → notch424 → mud → presence → lp → gate → comp → dest
+  //       → notch153 → notch379 → notch424 → mud → presence → lp → comp → dest
+  // NOTE: NO gate in this chain — gate was silencing all caller audio.
   sourceNode.connect(preBoost); preBoost.connect(gainNode);
   gainNode.connect(hp1); hp1.connect(hp2); hp2.connect(notch50);
   notch50.connect(notch100); notch100.connect(notch141); notch141.connect(notch153);
   notch153.connect(notch379); notch379.connect(notch424);
   notch424.connect(mud); mud.connect(presence); presence.connect(lp);
-  lp.connect(gate); gate.connect(comp); comp.connect(dest);
+  lp.connect(comp); comp.connect(dest);
 
   return comp;
 }
@@ -331,12 +270,18 @@ function buildAudioPipeline(micStreamIn, callerStreamIn) {
     const src  = audioCtx.createMediaStreamSource(micStreamIn);
     const comp = buildMicChain(audioCtx, src, micGain, dest);
     comp.connect(micAnalyser);
+    micAnalyser.connect(audioCtx.destination); // tap after comp, before dest — meter reads processed signal
   }
 
   if (callerStreamIn && callerStreamIn.getAudioTracks().length > 0) {
-    const src  = audioCtx.createMediaStreamSource(callerStreamIn);
+    const src = audioCtx.createMediaStreamSource(callerStreamIn);
+
+    // Tap analyser DIRECTLY on raw source — before all processing and gain.
+    // This ensures the CALLER meter shows signal regardless of gain slider value,
+    // confirming VB-Cable is actually delivering audio.
+    src.connect(sysAnalyser);
+
     const comp = buildCallerChain(audioCtx, src, callerGain, dest);
-    comp.connect(sysAnalyser);
   }
 
   // VU meter animation — draws real-time levels from analysers
