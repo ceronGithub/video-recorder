@@ -55,6 +55,7 @@
           <span class="toggle"></span>
           Capture Microphone
         </label>
+        <button class="micInfoIcon" id="micInfoIcon" title="What does the mic capture?" aria-label="Mic info">?</button>
       </div>
 
       <!-- Loopback device row -->
@@ -225,6 +226,42 @@
 
   </main>
 
+  <!-- ── SOURCE INFO MODAL ── -->
+  <div class="modalOverlay hidden" id="sourceInfoModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modalBox">
+      <div class="modalHeader">
+        <span class="modalIcon" id="modalIcon">⬜</span>
+        <div class="modalHeaderText">
+          <h2 class="modalTitle" id="modalTitle">Source Info</h2>
+          <span class="modalBadge" id="modalBadge" style="display:none;"></span>
+        </div>
+        <button class="modalCloseBtn" id="modalCloseBtn" aria-label="Close">✕</button>
+      </div>
+      <div class="modalBestForRow" id="modalBestForRow">
+        <span class="modalSectionLabel">BEST FOR</span>
+        <span class="modalBestFor" id="modalBestFor"></span>
+      </div>
+      <div class="modalAppsSection">
+        <span class="modalSectionLabel">WORKS GREAT WITH</span>
+        <div class="modalApps" id="modalApps"></div>
+      </div>
+      <div class="modalDivider"></div>
+      <div class="modalSection">
+        <span class="modalSectionLabel">HOW IT CAPTURES</span>
+        <p class="modalBody" id="modalHowIt"></p>
+      </div>
+      <div class="modalSection modalAudioSection">
+        <span class="modalSectionLabel modalAudioLabel">🔊 AUDIO BEHAVIOR</span>
+        <p class="modalBody" id="modalAudioNote"></p>
+      </div>
+      <div class="modalDivider"></div>
+      <div class="modalSection">
+        <span class="modalSectionLabel">TIPS</span>
+        <ul class="modalTipsList" id="modalTipsList"></ul>
+      </div>
+    </div>
+  </div>
+
   <!-- ts-ebml: injects duration + cues into WebM so WEBM files are seekable -->
   <script src="https://cdn.jsdelivr.net/npm/ts-ebml@2.0.2/lib/index.js"></script>
   <!-- ffmpeg.wasm: true MP4 remux — writes real moov atom with duration so all players can seek -->
@@ -234,305 +271,8 @@
   <script src="js/devices.js"></script>
   <script src="js/audio.js"></script>
   <script src="js/save.js"></script>
+  <script src="js/sources.js"></script>
   <script src="js/recorder.js"></script>
+  <script src="js/sourceInfo.js"></script>
 </body>
-</html><!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>VCREC — Video Call Recorder</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="css/style.css" />
-  </head>
-  <body>
-    <div class="grain"></div>
-
-    <header class="header">
-      <div class="logo">VCREC<span class="dot">●</span></div>
-      <div class="status-bar" id="statusBar">IDLE</div>
-    </header>
-
-    <main class="main">
-      <!-- ── PANEL 01: SOURCE + CONTROLS (merged) ── -->
-      <section class="panel source-panel">
-        <h2 class="panel-label">01 / SOURCE &amp; CONTROLS</h2>
-
-        <!-- Source grid -->
-        <div class="source-grid">
-          <button class="src-btn active" id="btnScreen" data-mode="screen">
-            <span class="src-icon">⬜</span>
-            <span>Entire Screen</span>
-          </button>
-          <button class="src-btn" id="btnWindow" data-mode="window">
-            <span class="src-icon">⧉</span>
-            <span>Application Window</span>
-          </button>
-          <button class="src-btn" id="btnScreenTabMic" data-mode="screentabmic">
-            <span class="src-icon">🎙</span>
-            <span>Screen + Tab + Mic</span>
-            <span class="src-tag">CALL REC</span>
-          </button>
-          <button class="src-btn" id="btnCamera" data-mode="camera">
-            <span class="src-icon">◉</span>
-            <span>Camera + Mic</span>
-          </button>
-          <button class="src-btn" id="btnInterview" data-mode="interview">
-            <span class="src-icon">🎧</span>
-            <span>Interview / Call</span>
-            <span class="src-tag">VB-CABLE</span>
-          </button>
-        </div>
-
-        <!-- Mic toggle -->
-        <div class="mic-row">
-          <label class="toggle-label">
-            <input type="checkbox" id="includeMic" checked />
-            <span class="toggle"></span>
-            Capture Microphone
-          </label>
-        </div>
-
-        <!-- Loopback device row -->
-        <div class="caller-device-row" id="callerDeviceRow">
-          <span class="caller-device-label"
-            >Caller Audio Device<br /><small
-              >(VB-Cable / Stereo Mix)</small
-            ></span
-          >
-          <select id="callerDeviceSelect" class="caller-device-select"></select>
-          <button
-            id="btnRefreshDevices"
-            class="btn-refresh"
-            title="Refresh device list"
-          >
-            ↻
-          </button>
-        </div>
-
-        <!-- Loopback warning -->
-        <div class="loopback-warning" id="loopbackWarning">
-          ⚠ No Caller Audio Device selected. Desktop app audio (Teams, Zoom)
-          will NOT be recorded. Install VB-Cable and select it above, or switch
-          to <strong>Screen + Tab + Mic</strong> for browser calls.<br />
-          <strong>YouTube / browser audio:</strong> Use
-          <strong>Screen + Tab + Mic</strong> → pick the Chrome tab → enable
-          <strong>"Share tab audio"</strong>.
-        </div>
-
-        <!-- Amplify row — x1 to x5 multiplier applied on top of volume sliders -->
-        <div class="amp-row">
-          <div class="amp-group">
-            <span class="amp-label">MIC AMP</span>
-            <div class="amp-btns" id="micAmpBtns">
-              <button class="amp-btn active" data-val="1">×1</button>
-              <button class="amp-btn" data-val="2">×2</button>
-              <button class="amp-btn" data-val="3">×3</button>
-              <button class="amp-btn" data-val="4">×4</button>
-              <button class="amp-btn" data-val="5">×5</button>
-            </div>
-          </div>
-          <div class="amp-group">
-            <span class="amp-label">CALLER AMP</span>
-            <div class="amp-btns" id="callerAmpBtns">
-              <button class="amp-btn active" data-val="1">×1</button>
-              <button class="amp-btn" data-val="2">×2</button>
-              <button class="amp-btn" data-val="3">×3</button>
-              <button class="amp-btn" data-val="4">×4</button>
-              <button class="amp-btn" data-val="5">×5</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Divider -->
-        <div class="panel-divider"></div>
-
-        <!-- Format selector — choose before clicking START -->
-        <div class="format-select-row">
-          <span class="format-select-label">OUTPUT FORMAT</span>
-          <div class="format-options">
-            <label class="format-opt">
-              <input type="radio" name="outputFormat" value="webm" checked />
-              <span class="format-opt-box">
-                <span class="format-opt-name">WEBM</span>
-                <span class="format-opt-desc">VP9 + Opus · Best quality</span>
-              </span>
-            </label>
-            <label class="format-opt">
-              <input type="radio" name="outputFormat" value="mp4" />
-              <span class="format-opt-box">
-                <span class="format-opt-name">MP4</span>
-                <span class="format-opt-desc">H.264 + AAC · Universal</span>
-              </span>
-            </label>
-            <label class="format-opt">
-              <input type="radio" name="outputFormat" value="mp3" />
-              <span class="format-opt-box">
-                <span class="format-opt-name">MP3</span>
-                <span class="format-opt-desc">Audio only · No video</span>
-              </span>
-            </label>
-          </div>
-        </div>
-
-        <!-- Divider -->
-        <div class="panel-divider"></div>
-
-        <!-- Controls + quality — inside panel 01 -->
-        <div class="preview-controls">
-          <div class="preview-btns">
-            <button class="ctrl-btn primary" id="btnStart">▶ START</button>
-            <button class="ctrl-btn ghost-pause" id="btnPause" disabled>
-              ⏸ PAUSE
-            </button>
-            <button class="ctrl-btn danger" id="btnStop" disabled>
-              ⏹ STOP &amp; SAVE
-            </button>
-          </div>
-          <div class="preview-format">
-            <select id="qualitySelect" class="fmt-select">
-              <option value="2500000">High — 2.5 Mbps</option>
-              <option value="5000000" selected>Best — 5 Mbps</option>
-              <option value="8000000">Max — 8 Mbps</option>
-            </select>
-            <span class="fmt-tag" id="fmtTag">WEBM · VP9+Opus</span>
-          </div>
-        </div>
-      </section>
-
-      <!-- ── PANEL 02: PREVIEW ── -->
-      <section class="panel preview-panel">
-        <h2 class="panel-label">02 / LIVE PREVIEW</h2>
-
-        <!-- Live video feed -->
-        <div class="preview-wrap" id="previewWrap">
-          <video id="previewVideo" autoplay muted playsinline></video>
-          <div class="preview-placeholder" id="previewPlaceholder">
-            <div class="ph-icon">▶</div>
-            <p>
-              Select a source above and click START — live preview appears here
-            </p>
-          </div>
-          <div class="rec-badge" id="recBadge">
-            <span class="rec-dot"></span> REC
-          </div>
-          <div class="rec-timer" id="recTimer">00:00:00</div>
-        </div>
-      </section>
-
-      <!-- ── PANEL 03: AUDIO LEVELS ── -->
-      <section class="panel audio-panel">
-        <h2 class="panel-label">03 / AUDIO LEVELS</h2>
-        <div class="audio-meters">
-          <div class="meter-row">
-            <span class="meter-label">MIC</span>
-            <div class="meter-track">
-              <div class="meter-fill" id="micMeter"></div>
-            </div>
-            <input
-              type="range"
-              class="vol-slider"
-              id="micVolume"
-              min="0"
-              max="400"
-              value="100"
-              title="Mic Volume"
-            />
-            <span class="vol-pct" id="micVolPct">100%</span>
-          </div>
-          <div class="meter-row">
-            <span class="meter-label">CALLER</span>
-            <div class="meter-track">
-              <div class="meter-fill" id="sysMeter"></div>
-            </div>
-            <input
-              type="range"
-              class="vol-slider"
-              id="callerVolume"
-              min="0"
-              max="400"
-              value="100"
-              title="Caller Volume"
-            />
-            <span class="vol-pct" id="callerVolPct">100%</span>
-          </div>
-        </div>
-        <p class="audio-hint">
-          MIC = your voice · CALLER = other side · Both: noise cancel → de-mud →
-          presence boost → clarity → compressor
-        </p>
-      </section>
-
-      <!-- ── PANEL 04: SAVED RECORDINGS ── -->
-      <section class="panel recordings-panel">
-        <h2 class="panel-label">04 / SAVED RECORDINGS</h2>
-        <ul class="rec-list" id="recList">
-          <li class="rec-empty">No recordings yet.</li>
-        </ul>
-      </section>
-
-      <!-- ── PANEL 05: CALLER AUDIO GUIDE ── -->
-      <section class="panel hint-panel">
-        <h2 class="panel-label">05 / CAPTURING CALLER AUDIO — TWO METHODS</h2>
-        <div class="hint-cols">
-          <div class="hint-col">
-            <p class="hint-col-title">
-              METHOD A — Chrome Tab (browser-based calls only)
-            </p>
-            <ol class="hint-steps">
-              <li>Use <strong>Screen + Tab + Mic</strong> mode.</li>
-              <li>
-                In the share dialog, switch to <strong>"Chrome Tab"</strong>.
-              </li>
-              <li>Select your call tab (Messenger, Meet, etc.).</li>
-              <li>Check <strong>"Share tab audio"</strong> → click Share.</li>
-              <li>Works for web-based calls only — NOT desktop apps.</li>
-            </ol>
-          </div>
-          <div class="hint-col">
-            <p class="hint-col-title">
-              METHOD B — VB-Cable (MS Teams, Zoom, Skype desktop)
-            </p>
-            <ol class="hint-steps">
-              <li>
-                Install <strong>VB-Cable</strong> (free):
-                <em>vb-audio.com/Cable</em>
-              </li>
-              <li>
-                Windows Sound → Playback → set <strong>CABLE Input</strong> as
-                default.
-              </li>
-              <li>
-                In VCREC, select <strong>★ CABLE Output</strong> in Caller Audio
-                Device.
-              </li>
-              <li>
-                Use <strong>Entire Screen</strong> or
-                <strong>Window</strong> mode → START.
-              </li>
-              <li>
-                Status bar will show <strong>LOOPBACK</strong> when active.
-              </li>
-            </ol>
-          </div>
-        </div>
-      </section>
-    </main>
-
-    <!-- ts-ebml: injects duration + cues into WebM so WEBM files are seekable -->
-    <script src="https://cdn.jsdelivr.net/npm/ts-ebml@2.0.2/lib/index.js"></script>
-    <!-- ffmpeg.wasm: true MP4 remux — writes real moov atom with duration so all players can seek -->
-    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/umd/ffmpeg.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
-    <script src="js/dom.js"></script>
-    <script src="js/devices.js"></script>
-    <script src="js/audio.js"></script>
-    <script src="js/save.js"></script>
-    <script src="js/sources.js"></script>
-    <script src="js/recorder.js"></script>
-  </body>
 </html>
