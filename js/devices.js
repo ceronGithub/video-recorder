@@ -44,7 +44,7 @@ async function populateDevices() {
  * Loopback is only relevant for screen and window modes (desktop apps).
  */
 function updateLoopbackUI() {
-  const needsLoopback = (activeMode === 'screen' || activeMode === 'window');
+  const needsLoopback = (activeMode === 'screen' || activeMode === 'window' || activeMode === 'interview');
   callerDeviceRow.style.display = needsLoopback ? 'flex' : 'none';
   updateLoopbackWarning();
 }
@@ -55,7 +55,7 @@ function updateLoopbackUI() {
  */
 function updateLoopbackWarning() {
   if (!loopbackWarning) return;
-  const needsLoopback = (activeMode === 'screen' || activeMode === 'window');
+  const needsLoopback = (activeMode === 'screen' || activeMode === 'window' || activeMode === 'interview');
   const hasDevice     = callerDeviceSelect.value !== '';
   loopbackWarning.style.display = (needsLoopback && !hasDevice) ? 'block' : 'none';
 }

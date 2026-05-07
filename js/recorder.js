@@ -181,102 +181,38 @@ function stopRecording() {
 }
 
 /* ── START ──────────────────────────────────────────────────────────────────
- * Step 1: Capture video source (screen/window/tab/camera) via getDisplayMedia.
- * Step 2: Capture microphone via getUserMedia with noise suppression constraints.
- * Step 3: Capture loopback device as caller audio source.
- * Step 4: Determine caller audio source (loopback takes priority over tab audio).
- * Step 5: Build audio pipeline with gain + compressor chains.
- * Step 6: Combine video + processed audio into a single MediaStream.
- * Step 7: Determine mimeType and start MediaRecorder.
+ * Delegates all stream capture to sources.js captureForMode().
+ * Each mode is fully isolated — changing one never affects another.
+ * Steps here: capture → audio pipeline → combine → MediaRecorder → go.
  */
 btnStart.addEventListener('click', async () => {
   try {
     setStatus('CAPTURING…', '');
 
-    let displayStream = null;
-    let cameraStream  = null;
-    loopbackStream    = null;
-
     const mode = getActiveMode();
 
-    // Step 1: Capture video source
-    if (mode === 'screen') {
-      displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { displaySurface: 'monitor', cursor: 'always' },
-        audio: { suppressLocalAudioPlayback: false },
-        selfBrowserSurface: 'exclude',
-        systemAudio: 'include'
-      });
-    } else if (mode === 'window') {
-      displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { displaySurface: 'window', cursor: 'always' },
-        audio: true,
-        selfBrowserSurface: 'exclude'
-      });
-    } else if (mode === 'screentabmic') {
-      displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { displaySurface: 'browser', cursor: 'always' },
-        audio: true,
-        selfBrowserSurface: 'exclude'
-      });
-    } else if (mode === 'camera') {
-      cameraStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false
-      });
-    }
+    // ── Step 1: Capture streams via isolated mode function (sources.js) ──
+    const {
+      screenStream:       capturedScreen,
+      micStream:          capturedMic,
+      loopbackStream:     capturedLoopback,
+      callerAudioStream,
+      statusLabel,
+    } = await captureForMode(mode);
 
-    // Step 2: Capture microphone
-    const forceMic = (mode === 'screentabmic' || mode === 'camera');
-    let micStreamLocal = null;
-    if (forceMic || includeMic.checked) {
-      try {
-        micStreamLocal = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl:  false,
-            channelCount:     1,
-            sampleRate:       48000,
-            sampleSize:       16,
-            latency:          0
-          },
-          video: false
-        });
-      } catch (e) { console.warn('Mic unavailable:', e); }
-    }
+    // Store globally for stopRecording() cleanup
+    screenStream   = capturedScreen;
+    micStream      = capturedMic;
+    loopbackStream = capturedLoopback;
 
-    // Step 3: Capture loopback device as caller audio source
-    const loopbackDeviceId = callerDeviceSelect.value;
-    if (loopbackDeviceId && (mode === 'screen' || mode === 'window')) {
-      try {
-        loopbackStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            deviceId:         { exact: loopbackDeviceId },
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl:  false
-          },
-          video: false
-        });
-      } catch (e) { console.warn('Loopback device unavailable:', e); }
-    }
-
-    screenStream = displayStream || cameraStream;
-    micStream    = micStreamLocal;
-
-    // Step 4: Caller audio source — loopback takes priority over tab audio
-    const tabAudio          = (displayStream && displayStream.getAudioTracks().length > 0) ? displayStream : null;
-    const callerAudioStream = loopbackStream || tabAudio;
-
-    // Step 5: Build audio pipeline
-    const hasAnyAudio        = micStreamLocal || callerAudioStream;
+    // ── Step 2: Build audio pipeline ──
+    const hasAnyAudio        = capturedMic || callerAudioStream;
     let processedAudioStream = null;
     if (hasAnyAudio) {
-      processedAudioStream = buildAudioPipeline(micStreamLocal, callerAudioStream);
+      processedAudioStream = buildAudioPipeline(capturedMic, callerAudioStream);
     }
 
-    // Step 6: Combine video + processed audio
+    // ── Step 3: Combine video + processed audio into final MediaStream ──
     const chosenFormat = getChosenFormat();
     const videoTrack   = (chosenFormat !== 'mp3' && screenStream)
       ? screenStream.getVideoTracks()[0] : null;
@@ -286,7 +222,7 @@ btnStart.addEventListener('click', async () => {
     }
     const combined = new MediaStream(allTracks);
 
-    // Show live preview immediately using raw screenStream
+    // ── Step 4: Show live preview ──
     const previewStream = screenStream
       ? new MediaStream([...screenStream.getVideoTracks(), ...combined.getAudioTracks()])
       : combined;
@@ -295,7 +231,7 @@ btnStart.addEventListener('click', async () => {
     previewPh.classList.add('hidden');
     previewVideo.play().catch(() => {});
 
-    // Step 7: Determine mimeType and start MediaRecorder
+    // ── Step 5: Determine mimeType and start MediaRecorder ──
     let mimeType;
     if (chosenFormat === 'mp3') {
       mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -315,9 +251,12 @@ btnStart.addEventListener('click', async () => {
     mediaRecorder.ondataavailable = e => {
       if (e.data && e.data.size > 0) recordedChunks.push(e.data);
     };
-    mediaRecorder.onstop = () => { saveRecording(chosenFormat, mimeType, recordedChunks, elapsedSeconds); };
+    mediaRecorder.onstop = () => {
+      saveRecording(chosenFormat, mimeType, recordedChunks, elapsedSeconds);
+    };
     mediaRecorder.start(500);
 
+    // Auto-stop when user ends screen share via browser UI
     if (videoTrack) {
       videoTrack.onended = () => {
         if (mediaRecorder && mediaRecorder.state !== 'inactive') stopRecording();
@@ -328,9 +267,7 @@ btnStart.addEventListener('click', async () => {
     startTimer();
     recBadge.classList.add('visible');
     recTimer.classList.add('visible');
-
-    const callerSrc = loopbackStream ? 'LOOPBACK' : (tabAudio ? 'TAB AUDIO' : 'NO CALLER AUDIO');
-    setStatus(`RECORDING · ${callerSrc}`, 'recording');
+    setStatus(`RECORDING · ${statusLabel}`, 'recording');
 
     btnStart.disabled    = true;
     btnStop.disabled     = false;
