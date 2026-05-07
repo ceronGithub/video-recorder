@@ -1,0 +1,133 @@
+VCREC — Recommended Features
+=============================
+Generated: 2026-05-07
+
+============================================================
+CATEGORY 1: RECORDING QUALITY
+============================================================
+
+FEATURE: In-Browser Playback
+  What it does : Play recordings directly inside Panel 04 without downloading first.
+  How it works : On STOP & SAVE, inject an <audio> or <video> element into the rec-item
+                 entry pointing at the existing blob URL. Controls: play, pause, seek bar,
+                 volume. No extra processing needed — blob URL is already in memory.
+
+FEATURE: Recording Chapters (Timestamp Markers)
+  What it does : Let the user drop a named timestamp marker mid-recording (like bookmarks).
+  How it works : Add a MARK button next to PAUSE. On click, push { label, elapsedSeconds }
+                 into a markers[] array. On save, write a companion .txt sidecar file listing
+                 all markers and their timecodes alongside the recording file.
+
+FEATURE: Auto-Split
+  What it does : Automatically split the recording into chunks every X minutes.
+  How it works : Add a "Split every" dropdown (off / 15 min / 30 min / 60 min). Use a
+                 setInterval that calls mediaRecorder.stop() + mediaRecorder.start() at
+                 the chosen interval. Each stop triggers saveRecording() independently,
+                 producing numbered files: vcrec-001.mp4, vcrec-002.mp4, etc.
+
+============================================================
+CATEGORY 2: AUDIO
+============================================================
+
+FEATURE: Noise Gate
+  What it does : Silences the mic below a configurable dB threshold — kills background hum
+                 and ambient noise between speech.
+  How it works : Insert a DynamicsCompressorNode configured as a gate (high ratio, fast
+                 attack, high threshold) into the mic audio chain inside audio.js, after
+                 the existing micGain node. Add a threshold slider in Panel 03.
+
+FEATURE: Push-to-Talk
+  What it does : Mic stays muted; hold a hotkey (e.g. Space or configurable key) to
+                 unmit temporarily — classic PTT behavior.
+  How it works : Add a keydown/keyup listener in a new ptt.js module. On keydown: set
+                 micGain to slider value. On keyup: set micGain to 0. Show a PTT
+                 active indicator badge in the UI when the key is held.
+
+FEATURE: Audio Waveform Preview
+  What it does : Renders a static waveform thumbnail in Panel 04 for each recording
+                 so the user can visually locate speech before playing.
+  How it works : After save, decode the blob via AudioContext.decodeAudioData(), sample
+                 the PCM data into ~200 buckets, draw onto a small <canvas> element
+                 injected into the rec-item entry.
+
+============================================================
+CATEGORY 3: RECORDING CONTROLS
+============================================================
+
+FEATURE: Global Hotkeys
+  What it does : Start, Pause, and Stop recording via keyboard shortcuts without
+                 switching back to the VCREC window.
+  How it works : Add a new hotkeys.js module. Register document-level keydown listeners:
+                   Ctrl+Shift+R → btnStart.click()
+                   Ctrl+Shift+P → btnPause.click()
+                   Ctrl+Shift+S → btnStop.click()
+                 Display the bindings in a small legend beneath the control buttons.
+                 Make bindings configurable via a settings panel (store in localStorage).
+
+FEATURE: Countdown Before Record
+  What it does : Show a 3-2-1 countdown overlay before capture actually starts, giving
+                 the user time to switch back to their call window.
+  How it works : On START click, show a fullscreen countdown overlay (CSS: fixed,
+                 z-index top). After 3 seconds, hide overlay and proceed with the
+                 existing captureForMode() call. Countdown value configurable (off / 3s / 5s).
+
+FEATURE: Auto-Stop on Silence
+  What it does : Automatically stop and save the recording after N consecutive seconds
+                 of silence on all audio channels.
+  How it works : In audio.js, connect an AnalyserNode after the final mix. In a
+                 requestAnimationFrame loop, read getByteFrequencyData() and compute RMS.
+                 If RMS stays below a threshold for the configured duration (e.g. 30s),
+                 call stopRecording(). Add an enable toggle + duration input in Panel 03.
+
+============================================================
+CATEGORY 4: FILE MANAGEMENT
+============================================================
+
+FEATURE: Persistent Recordings List
+  What it does : Remembers all recordings across page refreshes — the list in Panel 04
+                 survives closing and reopening the tab.
+  How it works : In save.js addToList(), serialize each entry (name, size, duration, fmt,
+                 blobURL) into localStorage under key 'vcrec_recordings'. On page load in
+                 a new recordings-persist.js module, read localStorage and re-render all
+                 entries. Note: blob URLs do not survive page refresh — store only metadata;
+                 blob re-download is not recoverable but the list entry remains as a record.
+
+FEATURE: Rename Recordings
+  What it does : Click a recording filename in Panel 04 to rename it inline before or
+                 after downloading.
+  How it works : In addToList(), wrap the <span class="rec-item-name"> in a contenteditable
+                 span. On blur or Enter key, update the displayed name and the download
+                 anchor's download attribute. Sync updated name to localStorage if
+                 persistence feature is also active.
+
+FEATURE: Bulk Download as ZIP
+  What it does : One-click download of all recordings in Panel 04 as a single .zip file.
+  How it works : Add a DOWNLOAD ALL button to Panel 04. Load JSZip from CDN. Iterate all
+                 rec-item entries, fetch each blob URL, add to zip with its filename.
+                 Call zip.generateAsync({ type: 'blob' }) and triggerDownload() with the
+                 resulting zip blob. New file: js/bulkDownload.js.
+
+============================================================
+CATEGORY 5: SESSION INFO
+============================================================
+
+FEATURE: Recording Notes
+  What it does : Attach a short text note to each recording entry in Panel 04
+                 (e.g. "Sales call with John", "Interview — candidate #3").
+  How it works : Add a small text input or expand-on-click textarea inside each rec-item
+                 in addToList(). On input blur, save note to localStorage keyed by filename.
+                 Display note text below the meta line in the recording entry.
+
+FEATURE: Export Transcript (Whisper API)
+  What it does : Send the recorded audio to OpenAI Whisper API and receive an
+                 auto-generated text transcript, saved alongside the recording.
+  How it works : Add a TRANSCRIBE button to each rec-item. On click, fetch the blob,
+                 POST to https://api.openai.com/v1/audio/transcriptions with model=whisper-1
+                 and the audio file. Display the returned text in an expandable panel
+                 under the recording entry. Allow copy-to-clipboard and .txt download.
+                 New file: js/transcribe.js. Requires user to supply their OpenAI API key
+                 via a settings input (stored in localStorage, never hardcoded).
+
+============================================================
+END OF DOCUMENT
+============================================================
