@@ -8,7 +8,12 @@
  *               → adaptive spectral gate → compressor → dest
  *
  * CALLER chain: source → preBoost → gain → HP(130Hz)×2 → same notches
- *               → mud → presence → LP → adaptive spectral gate → compressor → dest
+ *               → mud → presence → LP → compressor → dest
+ *               NOTE: Caller chain receives ONLY clean loopback (VB-Cable/Stereo Mix).
+ *               Application Window mode passes audio:false to getDisplayMedia so that
+ *               system audio bleed (laptop fan noise) can never reach this chain.
+ *               No noise gate on caller chain — loopback is a continuous stream;
+ *               a gate would profile caller speech as the noise floor and silence it.
  */
 
 'use strict';

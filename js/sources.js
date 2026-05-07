@@ -120,17 +120,24 @@ async function captureEntireScreen() {
 /* ============================================================
    MODE 02 — APPLICATION WINDOW
    ============================================================
-   WHAT: Captures a single application window. No system audio
-         (most browsers block it for window capture).
-         Caller audio comes from loopback device if selected.
-   HOW:  getDisplayMedia with displaySurface:'window'.
+   WHAT: Captures a single application window.
+         Caller audio comes ONLY from the loopback device (VB-Cable).
+   HOW:  getDisplayMedia with displaySurface:'window', audio:false.
+         audio:false is intentional — requesting audio:true on a window
+         surface causes the browser to include system audio bleed, which
+         captures laptop fan noise even though the caller (on their own
+         device) produces none of that noise. The caller's audio must
+         arrive through a clean loopback path (VB-Cable / Stereo Mix).
          Mic and loopback are optional.
    CALLED BY: captureForMode('window')
    ============================================================ */
 async function captureApplicationWindow() {
+  // audio: false — prevents system audio bleed (fan noise, ambient hiss)
+  // from leaking into the caller audio stream via getDisplayMedia tabAudio fallback.
+  // Caller audio must come exclusively from the loopback device.
   const displayStream = await navigator.mediaDevices.getDisplayMedia({
     video: { displaySurface: 'window', cursor: 'always' },
-    audio: true,
+    audio: false,
     selfBrowserSurface: 'exclude',
   });
 
@@ -138,15 +145,16 @@ async function captureApplicationWindow() {
   const loopbackId     = callerDeviceSelect.value;
   const loopbackStream = await safeLoopback(loopbackId);
 
-  const tabAudio          = displayStream.getAudioTracks().length > 0 ? displayStream : null;
-  const callerAudioStream = loopbackStream || tabAudio;
+  // callerAudioStream = loopback only. No tabAudio fallback in window mode —
+  // tabAudio from a window surface bleeds system/laptop noise into the caller channel.
+  const callerAudioStream = loopbackStream || null;
 
   return {
     screenStream:       displayStream,
     micStream,
     loopbackStream,
     callerAudioStream,
-    statusLabel:        loopbackStream ? 'LOOPBACK' : tabAudio ? 'WINDOW AUDIO' : 'NO CALLER AUDIO',
+    statusLabel:        loopbackStream ? 'LOOPBACK' : 'NO CALLER AUDIO',
   };
 }
 
